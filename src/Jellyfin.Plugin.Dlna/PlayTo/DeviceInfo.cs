@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Jellyfin.Plugin.Dlna.Common;
 using Jellyfin.Plugin.Dlna.Model;
@@ -89,6 +90,16 @@ public class DeviceInfo
     }
 
     /// <summary>
+    /// Gets or sets the base <see cref="Uri"/> that relative URLs of the device description are resolved against.
+    /// </summary>
+    /// <remarks>
+    /// This is the <c>URLBase</c> element of the device description if it provides one, otherwise the URL the
+    /// description was retrieved from, as required by the UPnP Device Architecture. Unlike <see cref="BaseUrl"/>
+    /// it keeps the path of the description, so relative URLs resolve to the directory serving the description.
+    /// </remarks>
+    public Uri? BaseUri { get; set; }
+
+    /// <summary>
     /// Gets or sets the icon.
     /// </summary>
     public DeviceIcon? Icon { get; set; }
@@ -101,6 +112,7 @@ public class DeviceInfo
     /// <summary>
     /// Gets the <see cref="DeviceIdentification"/>.
     /// </summary>
+    /// <returns>The <see cref="DeviceIdentification"/>.</returns>
     public DeviceIdentification ToDeviceIdentification()
     {
         return new DeviceIdentification

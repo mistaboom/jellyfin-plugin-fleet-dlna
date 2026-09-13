@@ -18,7 +18,6 @@ public static class ServiceActionListBuilder
         [
             GetIsValidated(),
             GetIsAuthorized(),
-            GetRegisterDevice(),
             GetGetAuthorizationDeniedUpdateID(),
             GetGetAuthorizationGrantedUpdateID(),
             GetGetValidationRevokedUpdateID(),
@@ -39,12 +38,14 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "DeviceID",
-                    Direction = "in"
+                    Direction = "in",
+                    RelatedStateVariable = "A_ARG_TYPE_DeviceID"
                 },
                 new Argument
                 {
                     Name = "Result",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "A_ARG_TYPE_Result"
                 }
             ]
         };
@@ -65,38 +66,14 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "DeviceID",
-                    Direction = "in"
+                    Direction = "in",
+                    RelatedStateVariable = "A_ARG_TYPE_DeviceID"
                 },
                 new Argument
                 {
                     Name = "Result",
-                    Direction = "out"
-                }
-            ]
-        };
-
-        return action;
-    }
-
-    /// <summary>
-    /// Returns the action details for "RegisterDevice".
-    /// </summary>
-    /// <returns>The <see cref="ServiceAction"/>.</returns>
-    private static ServiceAction GetRegisterDevice()
-    {
-        var action = new ServiceAction
-        {
-            Name = "RegisterDevice",
-            ArgumentList = [
-                new Argument
-                {
-                    Name = "RegistrationReqMsg",
-                    Direction = "in"
-                },
-                new Argument
-                {
-                    Name = "RegistrationRespMsg",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "A_ARG_TYPE_Result"
                 }
             ]
         };
@@ -117,7 +94,8 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "ValidationSucceededUpdateID",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "ValidationSucceededUpdateID"
                 }
             ]
         };
@@ -138,7 +116,8 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "AuthorizationDeniedUpdateID",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "AuthorizationDeniedUpdateID"
                 }
             ]
         };
@@ -159,7 +138,8 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "ValidationRevokedUpdateID",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "ValidationRevokedUpdateID"
                 }
             ]
         };
@@ -180,7 +160,8 @@ public static class ServiceActionListBuilder
                 new Argument
                 {
                     Name = "AuthorizationGrantedUpdateID",
-                    Direction = "out"
+                    Direction = "out",
+                    RelatedStateVariable = "AuthorizationGrantedUpdateID"
                 }
             ]
         };

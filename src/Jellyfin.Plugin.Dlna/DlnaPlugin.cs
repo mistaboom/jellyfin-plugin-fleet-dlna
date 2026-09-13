@@ -14,11 +14,6 @@ namespace Jellyfin.Plugin.Dlna;
 public class DlnaPlugin : BasePlugin<DlnaPluginConfiguration>, IHasWebPages
 {
     /// <summary>
-    /// The <see cref="DlnaPlugin"/> instance.
-    /// </summary>
-    public static DlnaPlugin Instance { get; private set; } = null!;
-
-    /// <summary>
     /// Initializes a new instance of the <see cref="DlnaPlugin"/> class.
     /// </summary>
     /// <param name="applicationPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
@@ -29,6 +24,11 @@ public class DlnaPlugin : BasePlugin<DlnaPluginConfiguration>, IHasWebPages
         Instance = this;
     }
 
+    /// <summary>
+    /// Gets the <see cref="DlnaPlugin"/> instance.
+    /// </summary>
+    public static DlnaPlugin Instance { get; private set; } = null!;
+
     /// <inheritdoc />
     public override Guid Id => Guid.Parse("17f31d5c-4f2e-4824-903b-759d481b711a");
 
@@ -36,7 +36,7 @@ public class DlnaPlugin : BasePlugin<DlnaPluginConfiguration>, IHasWebPages
     public override string Name => "Fleet DLNA";
 
     /// <inheritdoc />
-    public override string Description => "Use Jellyfin as a DLNA server.";
+    public override string Description => "Fleet-optimized DLNA for Jellyfin with fast navigation and profile-driven transcoding.";
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()

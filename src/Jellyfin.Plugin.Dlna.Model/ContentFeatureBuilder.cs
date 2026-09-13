@@ -21,6 +21,7 @@ public static class ContentFeatureBuilder
     /// <param name="height">The height.</param>
     /// <param name="isDirectStream">Value indicating wether the stream is direct.</param>
     /// <param name="orgPn">The orgPn.</param>
+    /// <returns>The image content features header.</returns>
     public static string BuildImageHeader(
         DlnaDeviceProfile profile,
         string container,
@@ -79,6 +80,7 @@ public static class ContentFeatureBuilder
     /// <param name="isDirectStream">Value indicating wether the stream is direct.</param>
     /// <param name="runtimeTicks">The runtime ticks.</param>
     /// <param name="transcodeSeekInfo">The <see cref="TranscodeSeekInfo"/>.</param>
+    /// <returns>The audio content features header.</returns>
     public static string BuildAudioHeader(
         DlnaDeviceProfile profile,
         string? container,
@@ -167,6 +169,8 @@ public static class ContentFeatureBuilder
     /// <param name="numStreams">The number of streams.</param>
     /// <param name="videoCodecTag">The video codec tag.</param>
     /// <param name="isAvc">Value indicating wether the stream is AVC.</param>
+    /// <param name="videoRotation">The video rotation angle, usually 0 or +-90/180.</param>
+    /// <returns>The video content features headers.</returns>
     public static IEnumerable<string> BuildVideoHeader(
         DlnaDeviceProfile profile,
         string? container,
@@ -192,7 +196,8 @@ public static class ContentFeatureBuilder
         int? numAudioStreams,
         int numStreams,
         string? videoCodecTag,
-        bool? isAvc)
+        bool? isAvc,
+        int? videoRotation)
     {
         // first bit means Time based seek supported, second byte range seek supported (not sure about the order now), so 01 = only byte seek, 10 = time based, 11 = both, 00 = none
         var orgOp = ";DLNA.ORG_OP=" + DlnaMaps.GetOrgOpValue(runtimeTicks > 0, isDirectStream, transcodeSeekInfo);
@@ -242,7 +247,8 @@ public static class ContentFeatureBuilder
             numAudioStreams,
             numStreams,
             videoCodecTag,
-            isAvc);
+            isAvc,
+            videoRotation);
 
         var orgPnValues = new List<string>();
 
@@ -269,11 +275,17 @@ public static class ContentFeatureBuilder
             }
             else if (isDirectStream)
             {
-                // orgOp should be added all the time once the time based seek is resolved for transcoded streams
                 contentFeatureList.Add("DLNA.ORG_PN=" + orgPn + orgOp + orgCi + dlnaflags);
             }
             else
             {
+                // A transcode is deliberately advertised without any operation, which reads as
+                // "cannot seek". It does answer TimeSeekRange.dlna.org, and says so in the
+                // contentFeatures header of its own response, so DLNA.ORG_OP=10 would be true.
+                // Windows Media Player then seeks by byte range anyway, and a byte range on a
+                // transcode is answered 200 with Accept-Ranges: none and the stream restarted
+                // from the beginning, which leaves the player waiting for data that never comes.
+                // Turning this back on needs a per profile switch for who is told it can seek.
                 contentFeatureList.Add("DLNA.ORG_PN=" + orgPn + orgCi + dlnaflags);
             }
         }
@@ -301,7 +313,19 @@ public static class ContentFeatureBuilder
             audioSampleRate,
             audioChannels);
 
-        return format.HasValue ? format.Value.ToString() : null;
+        return format switch
+        {
+            null => null,
+            MediaFormatProfile.WMA_BASE => "WMABASE",
+            MediaFormatProfile.WMA_FULL => "WMAFULL",
+
+            // LPCM has a single profile, the rate and the channel count are conveyed in the MIME type instead.
+            MediaFormatProfile.LPCM16_44_MONO
+                or MediaFormatProfile.LPCM16_44_STEREO
+                or MediaFormatProfile.LPCM16_48_MONO
+                or MediaFormatProfile.LPCM16_48_STEREO => "LPCM",
+            _ => format.Value.ToString()
+        };
     }
 
     private static MediaFormatProfile[] GetVideoOrgPnValue(string? container, string? videoCodec, string? audioCodec, int? width, int? height, TransportStreamTimestamp timestamp)

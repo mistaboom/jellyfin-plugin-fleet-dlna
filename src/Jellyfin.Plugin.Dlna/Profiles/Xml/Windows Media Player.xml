@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+<Profile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Name>Windows Media Player</Name>
+  <Identification>
+    <ModelName>Windows Media Player</ModelName>
+    <Manufacturer>Microsoft Corporation</Manufacturer>
+    <Headers>
+      <HttpHeaderInfo name="User-Agent" value="Windows-Media-Player" match="Substring" />
+    </Headers>
+  </Identification>
+  <Manufacturer>Jellyfin</Manufacturer>
+  <ManufacturerUrl>https://github.com/jellyfin/jellyfin</ManufacturerUrl>
+  <ModelName>Jellyfin Server</ModelName>
+  <ModelDescription>UPnP/AV 1.0 Compliant Media Server</ModelDescription>
+  <ModelNumber>01</ModelNumber>
+  <ModelUrl>https://github.com/jellyfin/jellyfin</ModelUrl>
+  <EnableAlbumArtInDidl>false</EnableAlbumArtInDidl>
+  <EnableSingleAlbumArtLimit>false</EnableSingleAlbumArtLimit>
+  <EnableSingleSubtitleLimit>false</EnableSingleSubtitleLimit>
+  <SupportedMediaTypes>Audio,Photo,Video</SupportedMediaTypes>
+  <AlbumArtPn>JPEG_SM</AlbumArtPn>
+  <MaxAlbumArtWidth>480</MaxAlbumArtWidth>
+  <MaxAlbumArtHeight>480</MaxAlbumArtHeight>
+  <MaxIconWidth>48</MaxIconWidth>
+  <MaxIconHeight>48</MaxIconHeight>
+  <MaxStreamingBitrate>140000000</MaxStreamingBitrate>
+  <MaxStaticBitrate>140000000</MaxStaticBitrate>
+  <MusicStreamingTranscodingBitrate>192000</MusicStreamingTranscodingBitrate>
+  <MaxStaticMusicBitrate xsi:nil="true" />
+  <ProtocolInfo>http-get:*:video/mpeg:*,http-get:*:video/mp4:*,http-get:*:video/vnd.dlna.mpeg-tts:*,http-get:*:video/avi:*,http-get:*:video/x-ms-wmv:*,http-get:*:audio/mpeg:*,http-get:*:audio/mp3:*,http-get:*:audio/mp4:*,http-get:*:audio/x-ms-wma:*,http-get:*:audio/wav:*,http-get:*:audio/L16:*,http-get:*:image/jpeg:*,http-get:*:image/png:*,http-get:*:image/gif:*,http-get:*:image/tiff:*</ProtocolInfo>
+  <TimelineOffsetSeconds>0</TimelineOffsetSeconds>
+  <RequiresPlainVideoItems>false</RequiresPlainVideoItems>
+  <RequiresPlainFolders>false</RequiresPlainFolders>
+  <EnableMSMediaReceiverRegistrar>true</EnableMSMediaReceiverRegistrar>
+  <IgnoreTranscodeByteRangeRequests>false</IgnoreTranscodeByteRangeRequests>
+  <XmlRootAttributes />
+  <!--
+    What Media Player decodes on its own, on every Windows version it ships with, which is the only
+    thing a bundled profile can assume. Left out on purpose:
+
+      HEVC, VP9, AV1, MPEG-2   an extension from the Store, so present on one machine and not the
+                               next regardless of the Windows version
+      AC-3                     dropped in Windows 11 24H2, though an upgraded or OEM machine keeps
+                               it, so its presence cannot be told from the request either
+      FLAC, ALAC, VP8, MKV     Windows 10 and later only
+      Matroska                 not a supported container
+
+    Guessing that something is supported costs silence or an unplayable item, guessing the other way
+    costs a transcode, so the guess goes the cheap way. A machine that does have the extensions is
+    better served by a profile of its own under plugins/configurations/dlna/user.
+  -->
+  <DirectPlayProfiles>
+    <DirectPlayProfile container="mp4,m4v,mp4v" audioCodec="aac,mp3" videoCodec="h264,h263" type="Video" />
+    <DirectPlayProfile container="ts,m2ts" audioCodec="aac,mp3,mp2" videoCodec="h264" type="Video" />
+    <DirectPlayProfile container="asf,wmv" audioCodec="wmav2,wmapro,wmavoice" videoCodec="wmv2,wmv3,vc1" type="Video" />
+    <DirectPlayProfile container="3gp,3g2" audioCodec="aac,amr_nb,amr_wb" videoCodec="h264,h263" type="Video" />
+    <DirectPlayProfile container="mpg,mpeg" audioCodec="mp2,mp3" videoCodec="mpeg1video" type="Video" />
+    <DirectPlayProfile container="avi" audioCodec="mp3,pcm_s16le" videoCodec="mjpeg,dvvideo" type="Video" />
+    <DirectPlayProfile container="mp3" audioCodec="mp3" type="Audio" />
+    <DirectPlayProfile container="asf" audioCodec="wmav2,wmapro,wmavoice" type="Audio" />
+    <DirectPlayProfile container="mp4,m4a" audioCodec="aac" type="Audio" />
+    <DirectPlayProfile container="adts" audioCodec="aac" type="Audio" />
+    <DirectPlayProfile container="wav" audioCodec="pcm_s16le,pcm_s24le" type="Audio" />
+    <DirectPlayProfile container="aiff" audioCodec="pcm_s16be,pcm_s24be" type="Audio" />
+    <DirectPlayProfile container="jpeg" type="Photo" />
+  </DirectPlayProfiles>
+  <TranscodingProfiles>
+    <TranscodingProfile container="mp3" type="Audio" audioCodec="mp3" estimateContentLength="false" enableMpegtsM2TsMode="false" transcodeSeekInfo="Auto" copyTimestamps="false" context="Streaming" enableSubtitlesInManifest="false" minSegments="0" segmentLength="0" breakOnNonKeyFrames="false" />
+    <TranscodingProfile container="jpeg" type="Photo" videoCodec="jpeg" estimateContentLength="false" enableMpegtsM2TsMode="false" transcodeSeekInfo="Auto" copyTimestamps="false" context="Streaming" enableSubtitlesInManifest="false" minSegments="0" segmentLength="0" breakOnNonKeyFrames="false" />
+    <TranscodingProfile container="ts" type="Video" videoCodec="h264" audioCodec="mp3" maxAudioChannels="2" estimateContentLength="false" enableMpegtsM2TsMode="false" transcodeSeekInfo="Auto" copyTimestamps="false" context="Streaming" enableSubtitlesInManifest="false" minSegments="0" segmentLength="0" breakOnNonKeyFrames="false" />
+  </TranscodingProfiles>
+  <ContainerProfiles />
+  <CodecProfiles>
+    <CodecProfile type="Video" codec="h264">
+      <Conditions>
+        <ProfileCondition condition="EqualsAny" property="VideoProfile" value="high|main|baseline|constrained baseline" isRequired="false" />
+        <ProfileCondition condition="LessThanEqual" property="VideoLevel" value="51" isRequired="false" />
+        <ProfileCondition condition="LessThanEqual" property="VideoBitDepth" value="8" isRequired="false" />
+      </Conditions>
+      <ApplyConditions />
+    </CodecProfile>
+    <CodecProfile type="VideoAudio">
+      <Conditions>
+        <ProfileCondition condition="LessThanEqual" property="AudioChannels" value="2" isRequired="false" />
+      </Conditions>
+      <ApplyConditions />
+    </CodecProfile>
+    <CodecProfile type="Audio">
+      <Conditions>
+        <ProfileCondition condition="LessThanEqual" property="AudioChannels" value="2" isRequired="false" />
+      </Conditions>
+      <ApplyConditions />
+    </CodecProfile>
+  </CodecProfiles>
+  <ResponseProfiles />
+  <SubtitleProfiles>
+    <SubtitleProfile format="srt" method="Embed" />
+    <SubtitleProfile format="subrip" method="Embed" />
+    <SubtitleProfile format="ass" method="Embed" />
+    <SubtitleProfile format="ssa" method="Embed" />
+    <SubtitleProfile format="pgs" method="Embed" />
+    <SubtitleProfile format="pgssub" method="Embed" />
+    <SubtitleProfile format="dvdsub" method="Embed" />
+    <SubtitleProfile format="vtt" method="Embed" />
+  </SubtitleProfiles>
+</Profile>

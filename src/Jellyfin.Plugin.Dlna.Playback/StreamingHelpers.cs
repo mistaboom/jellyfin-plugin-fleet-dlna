@@ -150,7 +150,7 @@ public static class StreamingHelpers
 
                 mediaSource = string.IsNullOrEmpty(streamingRequest.MediaSourceId)
                     ? mediaSources[0]
-                    : mediaSources.First(i => string.Equals(i.Id, streamingRequest.MediaSourceId, StringComparison.Ordinal));
+                    : mediaSources.FirstOrDefault(i => string.Equals(i.Id, streamingRequest.MediaSourceId, StringComparison.Ordinal));
 
                 if (mediaSource is null && Guid.Parse(streamingRequest.MediaSourceId).Equals(streamingRequest.Id))
                 {
@@ -163,6 +163,21 @@ public static class StreamingHelpers
             var liveStreamInfo = await mediaSourceManager.GetLiveStreamWithDirectStreamProvider(streamingRequest.LiveStreamId, cancellationToken).ConfigureAwait(false);
             mediaSource = liveStreamInfo.Item1;
             state.DirectStreamProvider = liveStreamInfo.Item2;
+
+            // The requested live stream is no longer open. This commonly happens when a client keeps
+            // polling the HLS playlist (e.g. live.m3u8) after the stream was disposed because its
+            // consumer count dropped to zero. GetLiveStreamWithDirectStreamProvider returns a null
+            // MediaSource in that case, so return 404 instead of dereferencing it below.
+            if (mediaSource is null)
+            {
+                throw new ResourceNotFoundException($"The live stream with id {streamingRequest.LiveStreamId} could not be found or is no longer available.");
+            }
+
+            // Cap the max bitrate when it is too high. This is usually due to ffmpeg is unable to probe the source liveTV streams' bitrate.
+            if (mediaSource.FallbackMaxStreamingBitrate is not null && streamingRequest.VideoBitRate is not null)
+            {
+                streamingRequest.VideoBitRate = Math.Min(streamingRequest.VideoBitRate.Value, mediaSource.FallbackMaxStreamingBitrate.Value);
+            }
         }
 
         var encodingOptions = serverConfigurationManager.GetEncodingOptions();
@@ -170,6 +185,13 @@ public static class StreamingHelpers
         encodingHelper.AttachMediaSourceInfo(state, encodingOptions, mediaSource, url);
 
         string? containerInternal = Path.GetExtension(state.RequestedUrl);
+
+        if (string.IsNullOrEmpty(containerInternal)
+            && (!string.IsNullOrWhiteSpace(streamingRequest.LiveStreamId)
+                || (mediaSource is not null && mediaSource.IsInfiniteStream)))
+        {
+            containerInternal = ".ts";
+        }
 
         if (!string.IsNullOrEmpty(streamingRequest.Container))
         {
@@ -207,7 +229,7 @@ public static class StreamingHelpers
             state.OutputVideoCodec = state.Request.VideoCodec;
             state.OutputVideoBitrate = encodingHelper.GetVideoBitrateParamValue(state.VideoRequest, state.VideoStream, state.OutputVideoCodec);
 
-            encodingHelper.TryStreamCopy(state);
+            encodingHelper.TryStreamCopy(state, encodingOptions);
 
             if (!EncodingHelper.IsCopyCodec(state.OutputVideoCodec) && state.OutputVideoBitrate.HasValue)
             {
@@ -249,6 +271,11 @@ public static class StreamingHelpers
                     state.VideoRequest.MaxHeight = resolution.MaxHeight;
                 }
             }
+
+            if (state.AudioStream is not null && !EncodingHelper.IsCopyCodec(state.OutputAudioCodec) && string.Equals(state.AudioStream.Codec, state.OutputAudioCodec, StringComparison.OrdinalIgnoreCase) && state.OutputAudioBitrate.HasValue)
+            {
+                state.OutputAudioCodec = state.SupportedAudioCodecs.Where(c => !EncodingHelper.LosslessAudioCodecs.Contains(c)).FirstOrDefault(mediaEncoder.CanEncodeToAudioCodec);
+            }
         }
 
         var deviceProfileId = state.IsVideoRequest
@@ -258,7 +285,7 @@ public static class StreamingHelpers
 
         var ext = string.IsNullOrWhiteSpace(state.OutputContainer)
             ? GetOutputFileExtension(state, mediaSource)
-            : ("." + state.OutputContainer);
+            : ("." + GetContainerFileExtension(state.OutputContainer));
 
         state.OutputFilePath = GetOutputFilePath(state, ext, serverConfigurationManager, streamingRequest.DeviceId, streamingRequest.PlaySessionId);
 
@@ -359,7 +386,8 @@ public static class StreamingHelpers
                         state.TargetAudioStreamCount,
                         state.TargetStreamCount,
                         state.TargetVideoCodecTag,
-                        state.IsTargetAVC)
+                        state.IsTargetAVC,
+                        state.VideoStream?.Rotation)
                     .FirstOrDefault() ?? string.Empty);
         }
     }
@@ -604,7 +632,8 @@ public static class StreamingHelpers
                 state.TargetAudioStreamCount,
                 state.TargetStreamCount,
                 state.TargetVideoCodecTag,
-                state.IsTargetAVC);
+                state.IsTargetAVC,
+                state.VideoStream?.Rotation);
 
         if (mediaProfile is not null)
         {
@@ -666,6 +695,7 @@ public static class StreamingHelpers
                     {
                         streamingRequest.DeviceProfileId = val;
                     }
+
                     break;
                 case 1:
                     request.DeviceId = val;
@@ -677,14 +707,18 @@ public static class StreamingHelpers
                     request.Static = string.Equals("true", val, StringComparison.OrdinalIgnoreCase);
                     break;
                 case 4:
-                    if (videoRequest is not null)
+                    if (videoRequest is not null && IsValidCodecName(val))
                     {
                         videoRequest.VideoCodec = val;
                     }
 
                     break;
                 case 5:
-                    request.AudioCodec = val;
+                    if (IsValidCodecName(val))
+                    {
+                        request.AudioCodec = val;
+                    }
+
                     break;
                 case 6:
                     if (videoRequest is not null)
@@ -738,7 +772,7 @@ public static class StreamingHelpers
                     request.StartTimeTicks = long.Parse(val, CultureInfo.InvariantCulture);
                     break;
                 case 15:
-                    if (videoRequest is not null)
+                    if (videoRequest is not null && EncodingHelper.LevelValidationRegex().IsMatch(val))
                     {
                         videoRequest.Level = val;
                     }
@@ -759,7 +793,7 @@ public static class StreamingHelpers
 
                     break;
                 case 18:
-                    if (videoRequest is not null)
+                    if (videoRequest is not null && IsValidCodecName(val))
                     {
                         videoRequest.Profile = val;
                     }
@@ -818,7 +852,11 @@ public static class StreamingHelpers
 
                     break;
                 case 30:
-                    request.SubtitleCodec = val;
+                    if (IsValidCodecName(val))
+                    {
+                        request.SubtitleCodec = val;
+                    }
+
                     break;
                 case 31:
                     if (videoRequest is not null)
@@ -839,5 +877,29 @@ public static class StreamingHelpers
                     break;
             }
         }
+    }
+
+    private static bool IsValidCodecName(string val)
+    {
+        return EncodingHelper.ContainerValidationRegex().IsMatch(val);
+    }
+
+    /// <summary>
+    /// Parses the container into its file extension.
+    /// </summary>
+    /// <param name="container">The container.</param>
+    private static string? GetContainerFileExtension(string? container)
+    {
+        if (string.Equals(container, "mpegts", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ts";
+        }
+
+        if (string.Equals(container, "matroska", StringComparison.OrdinalIgnoreCase))
+        {
+            return "mkv";
+        }
+
+        return container;
     }
 }

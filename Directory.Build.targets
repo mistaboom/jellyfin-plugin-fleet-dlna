@@ -1,0 +1,71 @@
+<Project>
+
+  <!-- See Directory.Build.props for what this switch is for. -->
+  <PropertyGroup Condition="'$(UseLocalJellyfin)' == 'true'">
+    <JellyfinLocalAssemblyDir>$(JellyfinSourcePath)/MediaBrowser.Controller/bin/$(Configuration)/$(TargetFramework)</JellyfinLocalAssemblyDir>
+
+    <!--
+      The ASP.NET Core framework reference below supersedes the Microsoft.AspNetCore packages a
+      project declares for itself, which NU1510 then reports as redundant. They are only redundant
+      while this switch is on, so the projects keep declaring them and the advisory is silenced.
+    -->
+    <NoWarn>$(NoWarn);NU1510</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UseLocalJellyfin)' == 'true' AND '@(PackageReference)' != ''">
+    <!--
+      Every Jellyfin assembly is referenced rather than only the packages a project names, because
+      they carry each other's types across their public signatures and a HintPath reference brings
+      nothing of its own along. The build output of that checkout holds the whole closure.
+    -->
+    <PackageReference Remove="Jellyfin.Common;Jellyfin.Controller;Jellyfin.Model;Jellyfin.Extensions" />
+
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>$(JellyfinLocalAssemblyDir)/MediaBrowser.Common.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>$(JellyfinLocalAssemblyDir)/MediaBrowser.Controller.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>$(JellyfinLocalAssemblyDir)/MediaBrowser.Model.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <Reference Include="Jellyfin.Extensions">
+      <HintPath>$(JellyfinLocalAssemblyDir)/Jellyfin.Extensions.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <Reference Include="Jellyfin.Data">
+      <HintPath>$(JellyfinLocalAssemblyDir)/Jellyfin.Data.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <Reference Include="Jellyfin.Database.Implementations">
+      <HintPath>$(JellyfinLocalAssemblyDir)/Jellyfin.Database.Implementations.dll</HintPath>
+      <Private>false</Private>
+      <Visible>false</Visible>
+    </Reference>
+
+    <!-- The removed packages also carried the ASP.NET Core abstractions these projects compile against -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <Target Name="CheckLocalJellyfinAssemblies"
+          BeforeTargets="ResolveAssemblyReferences"
+          Condition="'$(UseLocalJellyfin)' == 'true'">
+    <Error Condition="!Exists('$(JellyfinLocalAssemblyDir)/MediaBrowser.Controller.dll')"
+           Text="No built jellyfin assemblies in $(JellyfinLocalAssemblyDir). Build that checkout in $(Configuration) first." />
+    <Message Importance="high" Text="$(MSBuildProjectName): using local jellyfin assemblies from $(JellyfinLocalAssemblyDir)" />
+  </Target>
+
+</Project>

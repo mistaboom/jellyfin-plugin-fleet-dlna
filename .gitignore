@@ -331,3 +331,7 @@ ASALocalRun/
 
 artifacts
 .idea
+
+# Repository-local SDK used to build Jellyfin 12 / .NET 10
+.dotnet/
+.dotnet-home/

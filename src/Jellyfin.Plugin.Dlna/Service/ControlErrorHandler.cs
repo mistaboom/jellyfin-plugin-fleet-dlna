@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Xml;
 using Jellyfin.Plugin.Dlna.Didl;
+using Jellyfin.Plugin.Dlna.Extensions;
 
 namespace Jellyfin.Plugin.Dlna.Service;
 
@@ -17,6 +18,7 @@ public static class ControlErrorHandler
     /// Gets the response for an <see cref="Exception"/>.
     /// </summary>
     /// <param name="ex">The <see cref="Exception"/>.</param>
+    /// <returns>The <see cref="ControlResponse"/>.</returns>
     public static ControlResponse GetResponse(Exception ex)
     {
         var settings = new XmlWriterSettings
@@ -38,7 +40,7 @@ public static class ControlErrorHandler
             writer.WriteStartElement("SOAP-ENV", "Fault", NsSoapEnv);
 
             writer.WriteElementString("faultcode", "500");
-            writer.WriteElementString("faultstring", ex.Message);
+            writer.WriteElementString("faultstring", ex.Message.RemoveInvalidXmlChars());
 
             writer.WriteStartElement("detail");
             writer.WriteRaw("<UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>401</errorCode><errorDescription>Invalid Action</errorDescription></UPnPError>");

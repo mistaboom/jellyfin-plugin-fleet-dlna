@@ -95,8 +95,7 @@ internal sealed class MovieLibraryQueryScope
                 "DLNA movie-scope v2: library={LibraryId}, user={UserId}, nativeMovies={NativeCount}, physicalFolders=0; retaining native scope (no safe physical fallback).",
                 parent.Id,
                 user.Id,
-                nativeCount
-            );
+                nativeCount);
             return null;
         }
 
@@ -114,8 +113,7 @@ internal sealed class MovieLibraryQueryScope
             nativeCount,
             physicalCount,
             ancestors.Length,
-            useFallback ? "physical-ancestors" : "native"
-        );
+            useFallback ? "physical-ancestors" : "native");
         return useFallback ? ancestors : null;
     }
 
@@ -188,8 +186,7 @@ internal sealed class MovieLibraryQueryScope
                     // scope just because only some of its folders resolved.
                     _logger.LogWarning(
                         "DLNA movie-scope v2: library={LibraryId} has an unresolved configured media folder; retaining native scope.",
-                        library.Id
-                    );
+                        library.Id);
                     return [];
                 }
             }
@@ -201,8 +198,7 @@ internal sealed class MovieLibraryQueryScope
     private CollectionFolder[] ResolveLibraries(
         BaseItem parent,
         User user,
-        CollectionFolder[] visibleLibraries
-    )
+        CollectionFolder[] visibleLibraries)
     {
         var visited = new HashSet<Guid>();
         var current = parent;
@@ -252,6 +248,5 @@ internal sealed class MovieLibraryQueryScope
         left is not null && string.Equals(
             left.TrimEnd('/', '\\'),
             right.TrimEnd('/', '\\'),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal
-        );
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 }

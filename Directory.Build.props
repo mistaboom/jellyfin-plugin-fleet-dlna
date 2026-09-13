@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Building against a local jellyfin working copy instead of the published packages, for work that
+    needs a server API which has not been released yet:
+
+      dotnet build -p:UseLocalJellyfin=true
+
+    JellyfinSourcePath points at a checkout beside this one by default, and that checkout has to be
+    built in the same configuration first, as its compiled assemblies are what gets referenced. The
+    switch is off unless it is passed, so an ordinary build and CI keep resolving the packages.
+
+    The reference swap itself lives in Directory.Build.targets, which is evaluated after a project
+    has declared its PackageReferences and its TargetFramework.
+  -->
+  <PropertyGroup>
+    <UseLocalJellyfin Condition="'$(UseLocalJellyfin)' == ''">false</UseLocalJellyfin>
+    <JellyfinSourcePath Condition="'$(JellyfinSourcePath)' == ''">$(MSBuildThisFileDirectory)../jellyfin</JellyfinSourcePath>
+  </PropertyGroup>
+
+</Project>

@@ -15,19 +15,41 @@ namespace Rssdp.Infrastructure
     /// </summary>
     public class SsdpDevicePublisher : DisposableManagedObjectBase, ISsdpDevicePublisher
     {
-        private ISsdpCommunicationsServer _CommsServer;
+        private ISsdpCommunicationsServer? _CommsServer;
+
+        /// <summary>
+        /// The communications server, which is only available until this instance is disposed.
+        /// </summary>
+        private ISsdpCommunicationsServer CommsServer
+            => _CommsServer ?? throw new ObjectDisposedException(nameof(SsdpDevicePublisher));
         private string _OSName;
         private string _OSVersion;
         private bool _sendOnlyMatchedHost;
+
+        /// <summary>
+        /// The longest a search response is held back for, in milliseconds.
+        /// </summary>
+        private const int MaxSearchResponseDelayMilliseconds = 500;
+
+        /// <summary>
+        /// The longest Dispose waits for the byebye notifications to go out.
+        /// </summary>
+        private static readonly TimeSpan ByeByeNotificationTimeout = TimeSpan.FromSeconds(2);
 
         private bool _SupportPnpRootDevice;
 
         private IList<SsdpRootDevice> _Devices;
         private IReadOnlyList<SsdpRootDevice> _ReadOnlyDevices;
 
-        private Timer _RebroadcastAliveNotificationsTimer;
+        private Timer? _RebroadcastAliveNotificationsTimer;
 
-        private IDictionary<string, SearchRequest> _RecentSearchRequests;
+        private IDictionary<string, SearchRequest>? _RecentSearchRequests;
+
+        /// <summary>
+        /// The recent search request cache, which is only available until this instance is disposed.
+        /// </summary>
+        private IDictionary<string, SearchRequest> RecentSearchRequests
+            => _RecentSearchRequests ?? throw new ObjectDisposedException(nameof(SsdpDevicePublisher));
 
         private Random _Random;
 
@@ -51,12 +73,12 @@ namespace Rssdp.Infrastructure
             _Random = new Random();
 
             _CommsServer = communicationsServer;
-            _CommsServer.RequestReceived += CommsServer_RequestReceived;
+            CommsServer.RequestReceived += CommsServer_RequestReceived;
             _OSName = osName;
             _OSVersion = osVersion;
             _sendOnlyMatchedHost = sendOnlyMatchedHost;
 
-            _CommsServer.BeginListeningForMulticast();
+            CommsServer.BeginListeningForMulticast();
 
             // Send alive notification once on creation
             SendAllAliveNotifications(null);
@@ -114,7 +136,19 @@ namespace Rssdp.Infrastructure
         /// </remarks>
         /// <param name="device">The <see cref="SsdpDevice"/> instance to add.</param>
         /// <exception cref="ArgumentNullException">Thrown if the <paramref name="device"/> argument is null.</exception>
-        public async Task RemoveDevice(SsdpRootDevice device)
+        public Task RemoveDevice(SsdpRootDevice device)
+        {
+            return RemoveDevice(device, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Removes a device (and it's children) from the list of devices being published by this server, making them undiscoverable.
+        /// </summary>
+        /// <param name="device">The <see cref="SsdpDevice"/> instance to remove.</param>
+        /// <param name="cancellationToken">The token that aborts the byebye notifications.</param>
+        /// <returns>An awaitable <see cref="Task"/>.</returns>
+        /// <exception cref="ArgumentNullException">Thrown if the <paramref name="device"/> argument is null.</exception>
+        public async Task RemoveDevice(SsdpRootDevice device, CancellationToken cancellationToken)
         {
             if (device is null)
             {
@@ -134,7 +168,38 @@ namespace Rssdp.Infrastructure
             {
                 WriteTrace("Device Removed", device);
 
-                await SendByeByeNotifications(device, true, CancellationToken.None).ConfigureAwait(false);
+                await SendByeByeNotifications(device, true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Stops publishing and sends the byebye notifications for every device still published.
+        /// </summary>
+        /// <param name="cancellationToken">The token that aborts the byebye notifications.</param>
+        /// <returns>An awaitable <see cref="Task"/>.</returns>
+        public async Task StopAsync(CancellationToken cancellationToken)
+        {
+            DisposeRebroadcastTimer();
+
+            var commsServer = _CommsServer;
+            if (commsServer is not null)
+            {
+                commsServer.RequestReceived -= this.CommsServer_RequestReceived;
+            }
+
+            SsdpRootDevice[] devices;
+            lock (_Devices)
+            {
+                devices = _Devices.ToArray();
+            }
+
+            try
+            {
+                await Task.WhenAll(Array.ConvertAll(devices, device => RemoveDevice(device, cancellationToken))).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                WriteTrace("Aborted sending byebye notifications");
             }
         }
 
@@ -182,8 +247,18 @@ namespace Rssdp.Infrastructure
                     commsServer.RequestReceived -= this.CommsServer_RequestReceived;
                 }
 
-                var tasks = Devices.ToList().Select(RemoveDevice).ToArray();
-                Task.WaitAll(tasks);
+                try
+                {
+                    var byebye = Task.WhenAll(Devices.ToList().Select(RemoveDevice));
+                    if (!byebye.Wait(ByeByeNotificationTimeout))
+                    {
+                        WriteTrace("Timed out sending byebye notifications");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    WriteTrace("Error sending byebye notifications, exception " + ex.Message);
+                }
 
                 _CommsServer = null;
                 if (commsServer is not null)
@@ -199,8 +274,8 @@ namespace Rssdp.Infrastructure
         }
 
         private void ProcessSearchRequest(
-            string mx,
-            string searchTarget,
+            string? mx,
+            string? searchTarget,
             IPEndPoint remoteEndPoint,
             IPAddress receivedOnlocalIPAddress,
             CancellationToken cancellationToken)
@@ -241,11 +316,17 @@ namespace Rssdp.Infrastructure
                 maxWaitInterval = _Random.Next(0, 120);
             }
 
+            // The spec has a device spread its answers across the MX window so that a large network
+            // does not answer a search all at once. A home network has few enough devices for that
+            // to cost only discovery time: with the MX of 5 seconds clients commonly ask for, the
+            // server turns up seconds after everything else. Keep the jitter, cap how far it runs.
+            var maxWaitMilliseconds = Math.Min(maxWaitInterval * 1000, MaxSearchResponseDelayMilliseconds);
+
             // Do not block synchronously as that may tie up a threadpool thread for several seconds.
-            Task.Delay(_Random.Next(16, maxWaitInterval * 1000), cancellationToken).ContinueWith((parentTask) =>
+            Task.Delay(_Random.Next(16, maxWaitMilliseconds), cancellationToken).ContinueWith((parentTask) =>
             {
                 // Copying devices to local array here to avoid threading issues/enumerator exceptions.
-                IEnumerable<SsdpDevice> devices = null;
+                IEnumerable<SsdpDevice>? devices = null;
                 lock (_Devices)
                 {
                     if (string.Compare(SsdpConstants.SsdpDiscoverAllSTHeader, searchTarget, StringComparison.OrdinalIgnoreCase) == 0)
@@ -268,15 +349,25 @@ namespace Rssdp.Infrastructure
 
                 if (devices is not null)
                 {
-                    // WriteTrace(String.Format("Sending {0} search responses", deviceList.Count));
+                    // A multicast search reaches every interface this server listens on, so a host
+                    // with several of them would answer once per interface, each naming its own
+                    // address. A control point that picks the wrong answer is handed a location it
+                    // cannot route to. Answer from the interface the requester shares a subnet with
+                    // when there is one, and fall back to the receiving interface for a requester
+                    // that is routed in from somewhere else.
+                    var onRequesterSubnet = devices
+                        .Where(d => IsOnSameSubnet(d.ToRootDevice(), remoteEndPoint.Address))
+                        .ToArray();
 
-                    foreach (var device in devices)
+                    var answering = onRequesterSubnet.Length > 0 ? onRequesterSubnet : devices;
+
+                    foreach (var device in answering)
                     {
                         var root = device.ToRootDevice();
 
-                        if (!_sendOnlyMatchedHost || root.Address.Equals(receivedOnlocalIPAddress))
+                        if (onRequesterSubnet.Length > 0 || !_sendOnlyMatchedHost || root.Address.Equals(receivedOnlocalIPAddress))
                         {
-                            SendDeviceSearchResponses(device, remoteEndPoint, receivedOnlocalIPAddress, cancellationToken);
+                            SendDeviceSearchResponses(device, searchTarget, remoteEndPoint, receivedOnlocalIPAddress, cancellationToken);
                         }
                     }
                 }
@@ -290,10 +381,25 @@ namespace Rssdp.Infrastructure
 
         private void SendDeviceSearchResponses(
             SsdpDevice device,
+            string searchTarget,
             IPEndPoint endPoint,
             IPAddress receivedOnlocalIPAddress,
             CancellationToken cancellationToken)
         {
+            // UDA 1.0 section 1.3.3: the ST of a search response is the search target that matched,
+            // so a search for one target is answered exactly once. Answering with every target the
+            // device has instead makes control points that check the ST discard the responses.
+            if (!string.Equals(SsdpConstants.SsdpDiscoverAllSTHeader, searchTarget, StringComparison.OrdinalIgnoreCase))
+            {
+                // A search by UUID identifies the device itself, and carries no target after the USN
+                var usn = searchTarget.StartsWith("uuid:", StringComparison.OrdinalIgnoreCase)
+                    ? device.Udn
+                    : GetUsn(device.Udn, searchTarget);
+
+                SendSearchResponse(searchTarget, device, usn, endPoint, receivedOnlocalIPAddress, cancellationToken);
+                return;
+            }
+
             bool isRootDevice = (device as SsdpRootDevice) is not null;
             if (isRootDevice)
             {
@@ -307,6 +413,31 @@ namespace Rssdp.Infrastructure
             SendSearchResponse(device.Udn, device, device.Udn, endPoint, receivedOnlocalIPAddress, cancellationToken);
 
             SendSearchResponse(device.FullDeviceType, device, GetUsn(device.Udn, device.FullDeviceType), endPoint, receivedOnlocalIPAddress, cancellationToken);
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether an address is inside the subnet a root device is published on.
+        /// </summary>
+        /// <param name="rootDevice">The <see cref="SsdpRootDevice"/>.</param>
+        /// <param name="address">The address to test.</param>
+        /// <returns><c>true</c> if the address is on the same subnet.</returns>
+        private static bool IsOnSameSubnet(SsdpRootDevice rootDevice, IPAddress address)
+        {
+            if (rootDevice.PrefixLength == 0
+                || rootDevice.Address.AddressFamily != address.AddressFamily)
+            {
+                return false;
+            }
+
+            try
+            {
+                return new IPNetwork(rootDevice.Address, rootDevice.PrefixLength).Contains(address);
+            }
+            catch (ArgumentException)
+            {
+                // A prefix length that does not fit the address family cannot describe a subnet
+                return false;
+            }
         }
 
         private string GetUsn(string udn, string fullDeviceType)
@@ -341,7 +472,7 @@ namespace Rssdp.Infrastructure
 
             try
             {
-                await _CommsServer.SendMessage(
+                await CommsServer.SendMessage(
                         Encoding.UTF8.GetBytes(message),
                         endPoint,
                         receivedOnlocalIPAddress,
@@ -360,13 +491,13 @@ namespace Rssdp.Infrastructure
             var isDuplicateRequest = false;
 
             var newRequest = new SearchRequest() { EndPoint = endPoint, SearchTarget = searchTarget, Received = DateTime.UtcNow };
-            lock (_RecentSearchRequests)
+            lock (RecentSearchRequests)
             {
-                if (_RecentSearchRequests.TryGetValue(newRequest.Key, out var lastRequest))
+                if (RecentSearchRequests.TryGetValue(newRequest.Key, out var lastRequest))
                 {
                     if (lastRequest.IsOld())
                     {
-                        _RecentSearchRequests[newRequest.Key] = newRequest;
+                        RecentSearchRequests[newRequest.Key] = newRequest;
                     }
                     else
                     {
@@ -375,8 +506,8 @@ namespace Rssdp.Infrastructure
                 }
                 else
                 {
-                    _RecentSearchRequests.Add(newRequest.Key, newRequest);
-                    if (_RecentSearchRequests.Count > 10)
+                    RecentSearchRequests.Add(newRequest.Key, newRequest);
+                    if (RecentSearchRequests.Count > 10)
                     {
                         CleanUpRecentSearchRequestsAsync();
                     }
@@ -388,16 +519,16 @@ namespace Rssdp.Infrastructure
 
         private void CleanUpRecentSearchRequestsAsync()
         {
-            lock (_RecentSearchRequests)
+            lock (RecentSearchRequests)
             {
-                foreach (var requestKey in (from r in _RecentSearchRequests where r.Value.IsOld() select r.Key).ToArray())
+                foreach (var requestKey in (from r in RecentSearchRequests where r.Value.IsOld() select r.Key).ToArray())
                 {
-                    _RecentSearchRequests.Remove(requestKey);
+                    RecentSearchRequests.Remove(requestKey);
                 }
             }
         }
 
-        private void SendAllAliveNotifications(object state)
+        private void SendAllAliveNotifications(object? state)
         {
             try
             {
@@ -474,7 +605,7 @@ namespace Rssdp.Infrastructure
 
             var message = BuildMessage(header, values);
 
-            _CommsServer.SendMulticastMessage(message, _sendOnlyMatchedHost ? rootDevice.Address : null, cancellationToken);
+            CommsServer.SendMulticastMessage(message, _sendOnlyMatchedHost ? rootDevice.Address : null, cancellationToken);
 
             // WriteTrace(String.Format("Sent alive notification"), device);
         }
@@ -521,7 +652,7 @@ namespace Rssdp.Infrastructure
 
             var sendCount = IsDisposed ? 1 : 3;
             WriteTrace(string.Format(CultureInfo.InvariantCulture, "Sent byebye notification"), device);
-            return _CommsServer.SendMulticastMessage(message, sendCount, _sendOnlyMatchedHost ? device.ToRootDevice().Address : null, cancellationToken);
+            return CommsServer.SendMulticastMessage(message, sendCount, _sendOnlyMatchedHost ? device.ToRootDevice().Address : null, cancellationToken);
         }
 
         private void DisposeRebroadcastTimer()
@@ -547,9 +678,9 @@ namespace Rssdp.Infrastructure
             return TimeSpan.Zero;
         }
 
-        private string GetFirstHeaderValue(System.Net.Http.Headers.HttpRequestHeaders httpRequestHeaders, string headerName)
+        private string? GetFirstHeaderValue(System.Net.Http.Headers.HttpRequestHeaders httpRequestHeaders, string headerName)
         {
-            string retVal = null;
+            string? retVal = null;
             if (httpRequestHeaders.TryGetValues(headerName, out var values) && values is not null)
             {
                 retVal = values.FirstOrDefault();
@@ -558,7 +689,7 @@ namespace Rssdp.Infrastructure
             return retVal;
         }
 
-        public Action<string> LogFunction { get; set; }
+        public Action<string>? LogFunction { get; set; }
 
         private void WriteTrace(string text)
         {
@@ -579,7 +710,7 @@ namespace Rssdp.Infrastructure
             }
         }
 
-        private void CommsServer_RequestReceived(object sender, RequestReceivedEventArgs e)
+        private void CommsServer_RequestReceived(object? sender, RequestReceivedEventArgs e)
         {
             if (this.IsDisposed)
             {
@@ -601,11 +732,11 @@ namespace Rssdp.Infrastructure
 
         private class SearchRequest
         {
-            public IPEndPoint EndPoint { get; set; }
+            public required IPEndPoint EndPoint { get; set; }
 
             public DateTime Received { get; set; }
 
-            public string SearchTarget { get; set; }
+            public required string SearchTarget { get; set; }
 
             public string Key
             {

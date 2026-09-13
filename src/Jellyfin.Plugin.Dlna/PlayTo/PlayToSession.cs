@@ -10,6 +10,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
 using Jellyfin.Plugin.Dlna.Didl;
 using Jellyfin.Plugin.Dlna.Extensions;
+using Jellyfin.Plugin.Dlna.Localization;
 using Jellyfin.Plugin.Dlna.Model;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
@@ -18,7 +19,6 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
-using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Session;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
@@ -36,6 +36,8 @@ namespace Jellyfin.Plugin.Dlna.PlayTo;
 /// </summary>
 public class PlayToSession : ISessionController, IDisposable
 {
+    private static readonly MediaType[] _playableMediaTypes = [MediaType.Audio, MediaType.Video, MediaType.Photo];
+
     private readonly SessionInfo _session;
     private readonly ISessionManager _sessionManager;
     private readonly ILibraryManager _libraryManager;
@@ -44,7 +46,7 @@ public class PlayToSession : ISessionController, IDisposable
     private readonly IUserManager _userManager;
     private readonly IImageProcessor _imageProcessor;
     private readonly IUserDataManager _userDataManager;
-    private readonly ILocalizationManager _localization;
+    private readonly DlnaLocalization _localization;
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IDeviceDiscovery _deviceDiscovery;
@@ -53,6 +55,8 @@ public class PlayToSession : ISessionController, IDisposable
     private readonly List<PlaylistItem> _playlist = [];
     private Device _device;
     private int _currentPlaylistIndex;
+    private int _nextTrackIndex = -1;
+    private string? _nextTrackAnnouncedFor;
     private bool _disposed;
 
     /// <summary>
@@ -69,7 +73,7 @@ public class PlayToSession : ISessionController, IDisposable
     /// <param name="accessToken">The access token.</param>
     /// <param name="deviceDiscovery">Instance of the <see cref="IDeviceDiscovery"/> interface.</param>
     /// <param name="userDataManager">Instance of the <see cref="IUserDataManager"/> interface.</param>
-    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="DlnaLocalization"/> class.</param>
     /// <param name="mediaSourceManager">Instance of the <see cref="IMediaSourceManager"/> interface.</param>
     /// <param name="mediaEncoder">Instance of the <see cref="IMediaEncoder"/> interface.</param>
     /// <param name="device">The <see cref="Device"/>.</param>
@@ -85,7 +89,7 @@ public class PlayToSession : ISessionController, IDisposable
         string? accessToken,
         IDeviceDiscovery deviceDiscovery,
         IUserDataManager userDataManager,
-        ILocalizationManager localization,
+        DlnaLocalization localization,
         IMediaSourceManager mediaSourceManager,
         IMediaEncoder mediaEncoder,
         Device device)
@@ -118,12 +122,17 @@ public class PlayToSession : ISessionController, IDisposable
     }
 
     /// <summary>
-    /// Gets or sets a value indicating the session is active.
+    /// Gets a value indicating whether the session is active.
     /// </summary>
     public bool IsSessionActive => !_disposed;
 
     /// <summary>
-    /// Gets or sets a value indicating whether media control is supported.
+    /// Gets the base URL the renderer is currently controlled through.
+    /// </summary>
+    internal string DeviceBaseUrl => _device.Properties.BaseUrl;
+
+    /// <summary>
+    /// Gets a value indicating whether media control is supported.
     /// </summary>
     public bool SupportsMediaControl => IsSessionActive;
 
@@ -132,6 +141,8 @@ public class PlayToSession : ISessionController, IDisposable
      */
     private async Task SendNextTrackMessage(int currentPlayListItemIndex, CancellationToken cancellationToken)
     {
+        _nextTrackIndex = -1;
+
         if (currentPlayListItemIndex >= 0 && currentPlayListItemIndex < _playlist.Count - 1)
         {
             // The current playing item is indeed in the play list and we are not yet at the end of the playlist.
@@ -143,9 +154,58 @@ public class PlayToSession : ISessionController, IDisposable
                 return;
             }
 
-            // Send the SetNextAvTransport message.
-            await _device.SetNextAvTransport(nextItem.StreamUrl, GetDlnaHeaders(nextItem), nextItem.Didl, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // Send the SetNextAvTransport message. A device that accepts it advances to that track by
+                // itself, which OnDevicePlaybackStopped has to know about to not advance the playlist again.
+                if (await _device.SetNextAvTransport(nextItem.StreamUrl, GetDlnaHeaders(nextItem), nextItem.Didl, cancellationToken).ConfigureAwait(false))
+                {
+                    _nextTrackIndex = nextItemIndex;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Announcing the next track is optional, so a device that refuses it must not fail playback of
+                // the current one. The playlist is advanced by the server instead, _nextTrackIndex stays unset.
+                _logger.LogWarning(
+                    ex,
+                    "{DeviceName} - Failed to announce the next track, the server will advance the playlist itself",
+                    _session.DeviceName);
+            }
         }
+    }
+
+    private async Task SyncWithReportedMedia(StreamParams info, string mediaUrl, CancellationToken cancellationToken)
+    {
+        var currentIndex = _playlist.FindIndex(item => item.StreamInfo.ItemId.Equals(info.ItemId));
+        if (currentIndex < 0)
+        {
+            return;
+        }
+
+        _currentPlaylistIndex = currentIndex;
+
+        // AVTransport:1 section 2.4.3 defines SetNextAVTransportURI for a renderer that holds media, and one
+        // that is still on its way to a track can take what it has queued as the track to play right now,
+        // landing a track further on than the one it was handed. So the follow-up is announced only once the
+        // renderer reports that it is playing the track it was given, and only once for that track.
+        if (!_device.IsPlaying || string.Equals(_nextTrackAnnouncedFor, mediaUrl, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Marked before announcing: the device timer polls again while the announcement is still on its way
+        _nextTrackAnnouncedFor = mediaUrl;
+
+        await SendNextTrackMessage(currentIndex, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task SetAvTransport(PlaylistItem item, CancellationToken cancellationToken)
+    {
+        _nextTrackIndex = -1;
+        _nextTrackAnnouncedFor = null;
+
+        return _device.SetAvTransport(item.StreamUrl, GetDlnaHeaders(item), item.Didl, cancellationToken);
     }
 
     private async void OnDeviceUnavailable()
@@ -203,14 +263,7 @@ public class PlayToSession : ISessionController, IDisposable
 
             await _sessionManager.OnPlaybackStart(newItemProgress).ConfigureAwait(false);
 
-            // Send a message to the DLNA device to notify what is the next track in the playlist.
-            var currentItemIndex = _playlist.FindIndex(item => item.StreamInfo.ItemId.Equals(streamInfo.ItemId));
-            if (currentItemIndex >= 0)
-            {
-                _currentPlaylistIndex = currentItemIndex;
-            }
-
-            await SendNextTrackMessage(currentItemIndex, CancellationToken.None).ConfigureAwait(false);
+            await SyncWithReportedMedia(streamInfo, e.NewMediaInfo.Url, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -256,11 +309,25 @@ public class PlayToSession : ISessionController, IDisposable
 
             if (playedToCompletion)
             {
-                await SetPlaylistIndex(_currentPlaylistIndex + 1).ConfigureAwait(false);
+                var nextIndex = _currentPlaylistIndex + 1;
+
+                // The device was handed this track with SetNextAVTransportURI and moves to it on its own.
+                // Sending it again restarts the track the device is already playing, or skips the one after it.
+                if (_nextTrackIndex == nextIndex)
+                {
+                    _logger.LogDebug(
+                        "{DeviceName} - Not advancing the playlist, the device moves to track {NextIndex} on its own",
+                        _session.DeviceName,
+                        nextIndex);
+
+                    return;
+                }
+
+                await SetPlaylistIndex(nextIndex).ConfigureAwait(false);
             }
             else
             {
-                _playlist.Clear();
+                ClearPlaylist();
             }
         }
         catch (Exception ex)
@@ -303,6 +370,8 @@ public class PlayToSession : ISessionController, IDisposable
                 var progress = GetProgressInfo(info);
 
                 await _sessionManager.OnPlaybackStart(progress).ConfigureAwait(false);
+
+                await SyncWithReportedMedia(info, e.MediaInfo.Url, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -334,6 +403,10 @@ public class PlayToSession : ISessionController, IDisposable
                 var progress = GetProgressInfo(info);
 
                 await _sessionManager.OnPlaybackProgress(progress).ConfigureAwait(false);
+
+                // A renderer that was handed a track while it was on its way to another one may have been
+                // in no state to take the follow-up, so keep offering it for as long as it plays the track.
+                await SyncWithReportedMedia(info, mediaUrl, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -388,15 +461,29 @@ public class PlayToSession : ISessionController, IDisposable
             ? null :
             _userManager.GetUserById(command.ControllingUserId);
 
+        var profile = GetProfile();
+
+        // A profile can name any media type, but only the ones GetPlaylistItem knows can be played
+        var supportedMediaTypes = profile.FetchSupportedMediaTypes().Intersect(_playableMediaTypes).ToArray();
+
+        if (supportedMediaTypes.Length == 0)
+        {
+            _logger.LogWarning(
+                "{DeviceName} - Profile {ProfileName} declares no playable media type in \"{SupportedMediaTypes}\", nothing can be played",
+                _session.DeviceName,
+                profile.Name,
+                profile.SupportedMediaTypes);
+        }
+
         var items = new List<BaseItem>();
         foreach (var id in command.ItemIds)
         {
-            AddItemFromId(id, items);
+            AddItemFromId(id, supportedMediaTypes, items);
         }
 
         var startIndex = command.StartIndex ?? 0;
 
-        if (startIndex > items.Count)
+        if (startIndex >= items.Count)
         {
             _logger.LogDebug("{DeviceName} - Play command resulted in no items", _session.DeviceName);
             return Task.CompletedTask;
@@ -417,24 +504,15 @@ public class PlayToSession : ISessionController, IDisposable
             command.StartPositionTicks ?? 0,
             command.MediaSourceId ?? string.Empty,
             command.AudioStreamIndex,
-            command.SubtitleStreamIndex);
+            command.SubtitleStreamIndex,
+            profile);
 
         for (int i = 1; i < len; i++)
         {
-            playlist[i] = CreatePlaylistItem(items[i], user, 0, string.Empty, null, null);
+            playlist[i] = CreatePlaylistItem(items[i], user, 0, string.Empty, null, null, profile);
         }
 
         _logger.LogDebug("{0} - Playlist created", _session.DeviceName);
-
-        if (command.PlayCommand == PlayCommand.PlayLast)
-        {
-            _playlist.AddRange(playlist);
-        }
-
-        if (command.PlayCommand == PlayCommand.PlayNext)
-        {
-            _playlist.AddRange(playlist);
-        }
 
         if (!command.ControllingUserId.IsEmpty())
         {
@@ -447,6 +525,36 @@ public class PlayToSession : ISessionController, IDisposable
                 user);
         }
 
+        // Queueing only applies while there is a playlist to queue onto, an empty one just starts playing
+        if (_playlist.Count > 0
+            && (command.PlayCommand == PlayCommand.PlayLast || command.PlayCommand == PlayCommand.PlayNext))
+        {
+            if (command.PlayCommand == PlayCommand.PlayLast)
+            {
+                _playlist.AddRange(playlist);
+            }
+            else
+            {
+                _playlist.InsertRange(Math.Clamp(_currentPlaylistIndex + 1, 0, _playlist.Count), playlist);
+            }
+
+            _logger.LogDebug(
+                "{DeviceName} - {PlayCommand} queued {Count} items, playlist holds {Total}",
+                _session.DeviceName,
+                command.PlayCommand,
+                playlist.Length,
+                _playlist.Count);
+
+            // The item following the one that is playing may have changed, so tell the device about it again
+            _nextTrackAnnouncedFor = null;
+
+            var media = _device.CurrentMediaInfo;
+
+            return string.IsNullOrEmpty(media?.Url)
+                ? Task.CompletedTask
+                : SyncWithReportedMedia(StreamParams.ParseFromUrl(media.Url, _libraryManager, _mediaSourceManager), media.Url, cancellationToken);
+        }
+
         return PlayItems(playlist, cancellationToken);
     }
 
@@ -455,7 +563,7 @@ public class PlayToSession : ISessionController, IDisposable
         switch (command.Command)
         {
             case PlaystateCommand.Stop:
-                _playlist.Clear();
+                ClearPlaylist();
                 return _device.SetStop(CancellationToken.None);
 
             case PlaystateCommand.Pause:
@@ -493,13 +601,9 @@ public class PlayToSession : ISessionController, IDisposable
                 var user = _session.UserId.IsEmpty()
                     ? null
                     : _userManager.GetUserById(_session.UserId);
-                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, info.AudioStreamIndex, info.SubtitleStreamIndex);
+                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, info.AudioStreamIndex, info.SubtitleStreamIndex, GetProfile());
 
-                await _device.SetAvTransport(newItem.StreamUrl, GetDlnaHeaders(newItem), newItem.Didl, CancellationToken.None).ConfigureAwait(false);
-
-                // Send a message to the DLNA device to notify what is the next track in the play list.
-                var newItemIndex = _playlist.FindIndex(item => item.StreamUrl == newItem.StreamUrl);
-                await SendNextTrackMessage(newItemIndex, CancellationToken.None).ConfigureAwait(false);
+                await SetAvTransport(newItem, CancellationToken.None).ConfigureAwait(false);
 
                 return;
             }
@@ -518,14 +622,30 @@ public class PlayToSession : ISessionController, IDisposable
         return info.IsDirectStream;
     }
 
-    private void AddItemFromId(Guid id, List<BaseItem> list)
+    private void AddItemFromId(Guid id, IReadOnlyCollection<MediaType> supportedMediaTypes, List<BaseItem> list)
     {
         var item = _libraryManager.GetItemById(id);
-        if (item?.MediaType == MediaType.Audio || item?.MediaType == MediaType.Video)
+        if (item is null)
         {
-            list.Add(item);
+            return;
         }
+
+        if (!supportedMediaTypes.Contains(item.MediaType))
+        {
+            _logger.LogDebug(
+                "{DeviceName} - Skipping {ItemName}, the device does not support {MediaType}",
+                _session.DeviceName,
+                item.Name,
+                item.MediaType);
+
+            return;
+        }
+
+        list.Add(item);
     }
+
+    private DlnaDeviceProfile GetProfile()
+        => _dlnaManager.GetProfile(_device.Properties.ToDeviceIdentification()) ?? _dlnaManager.GetDefaultProfile();
 
     private PlaylistItem CreatePlaylistItem(
         BaseItem item,
@@ -533,13 +653,9 @@ public class PlayToSession : ISessionController, IDisposable
         long startPostionTicks,
         string? mediaSourceId,
         int? audioStreamIndex,
-        int? subtitleStreamIndex)
+        int? subtitleStreamIndex,
+        DlnaDeviceProfile profile)
     {
-        var deviceInfo = _device.Properties;
-
-        var profile = _dlnaManager.GetProfile(deviceInfo.ToDeviceIdentification()) ??
-                      _dlnaManager.GetDefaultProfile();
-
         var mediaSources = item is IHasMediaSources
             ? _mediaSourceManager.GetStaticMediaSources(item, true, user).ToArray()
             : [];
@@ -615,7 +731,8 @@ public class PlayToSession : ISessionController, IDisposable
                 streamInfo.TargetAudioStreamCount,
                 streamInfo.GetStreamCount(),
                 streamInfo.TargetVideoCodecTag,
-                streamInfo.IsTargetAVC);
+                streamInfo.IsTargetAVC,
+                streamInfo.TargetVideoStream?.Rotation);
 
             return list.FirstOrDefault();
         }
@@ -639,7 +756,7 @@ public class PlayToSession : ISessionController, IDisposable
                     AudioStreamIndex = audioStreamIndex,
                     SubtitleStreamIndex = subtitleStreamIndex,
                     EnableDirectStream = false
-                }),
+                }) ?? throw new InvalidOperationException("No optimal video stream found"),
                 Profile = profile
             },
             MediaType.Audio => new PlaylistItem
@@ -652,7 +769,7 @@ public class PlayToSession : ISessionController, IDisposable
                     DeviceId = deviceId,
                     MaxBitrate = profile.MaxStreamingBitrate,
                     MediaSourceId = mediaSourceId
-                }),
+                }) ?? throw new InvalidOperationException("No optimal audio stream found"),
                 Profile = profile
             },
             MediaType.Photo => PlaylistItemFactory.Create((Photo)item, profile),
@@ -667,7 +784,7 @@ public class PlayToSession : ISessionController, IDisposable
     /// <returns><c>true</c> on success.</returns>
     private async Task<bool> PlayItems(IEnumerable<PlaylistItem> items, CancellationToken cancellationToken = default)
     {
-        _playlist.Clear();
+        ClearPlaylist();
         _playlist.AddRange(items);
         _logger.LogDebug("{0} - Playing {1} items", _session.DeviceName, _playlist.Count);
 
@@ -675,11 +792,18 @@ public class PlayToSession : ISessionController, IDisposable
         return true;
     }
 
+    private void ClearPlaylist()
+    {
+        _playlist.Clear();
+        _nextTrackIndex = -1;
+        _nextTrackAnnouncedFor = null;
+    }
+
     private async Task SetPlaylistIndex(int index, CancellationToken cancellationToken = default)
     {
         if (index < 0 || index >= _playlist.Count)
         {
-            _playlist.Clear();
+            ClearPlaylist();
             await _device.SetStop(cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -687,10 +811,7 @@ public class PlayToSession : ISessionController, IDisposable
         _currentPlaylistIndex = index;
         var currentitem = _playlist[index];
 
-        await _device.SetAvTransport(currentitem.StreamUrl, GetDlnaHeaders(currentitem), currentitem.Didl, cancellationToken).ConfigureAwait(false);
-
-        // Send a message to the DLNA device to notify what is the next track in the play list.
-        await SendNextTrackMessage(index, cancellationToken).ConfigureAwait(false);
+        await SetAvTransport(currentitem, cancellationToken).ConfigureAwait(false);
 
         var streamInfo = currentitem.StreamInfo;
         if (streamInfo.StartPositionTicks > 0 && EnableClientSideSeek(streamInfo))
@@ -801,13 +922,9 @@ public class PlayToSession : ISessionController, IDisposable
                 var user = _session.UserId.IsEmpty()
                     ? null
                     : _userManager.GetUserById(_session.UserId);
-                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, newIndex, info.SubtitleStreamIndex);
+                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, newIndex, info.SubtitleStreamIndex, GetProfile());
 
-                await _device.SetAvTransport(newItem.StreamUrl, GetDlnaHeaders(newItem), newItem.Didl, CancellationToken.None).ConfigureAwait(false);
-
-                // Send a message to the DLNA device to notify what is the next track in the play list.
-                var newItemIndex = _playlist.FindIndex(item => item.StreamUrl == newItem.StreamUrl);
-                await SendNextTrackMessage(newItemIndex, CancellationToken.None).ConfigureAwait(false);
+                await SetAvTransport(newItem, CancellationToken.None).ConfigureAwait(false);
 
                 if (EnableClientSideSeek(newItem.StreamInfo))
                 {
@@ -832,13 +949,9 @@ public class PlayToSession : ISessionController, IDisposable
                 var user = _session.UserId.IsEmpty()
                     ? null
                     : _userManager.GetUserById(_session.UserId);
-                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, info.AudioStreamIndex, newIndex);
+                var newItem = CreatePlaylistItem(info.Item, user, newPosition, info.MediaSourceId, info.AudioStreamIndex, newIndex, GetProfile());
 
-                await _device.SetAvTransport(newItem.StreamUrl, GetDlnaHeaders(newItem), newItem.Didl, CancellationToken.None).ConfigureAwait(false);
-
-                // Send a message to the DLNA device to notify what is the next track in the play list.
-                var newItemIndex = _playlist.FindIndex(item => item.StreamUrl == newItem.StreamUrl);
-                await SendNextTrackMessage(newItemIndex, CancellationToken.None).ConfigureAwait(false);
+                await SetAvTransport(newItem, CancellationToken.None).ConfigureAwait(false);
 
                 if (EnableClientSideSeek(newItem.StreamInfo) && newPosition > 0)
                 {
@@ -848,16 +961,33 @@ public class PlayToSession : ISessionController, IDisposable
         }
     }
 
+    /// <summary>
+    /// Waits for the renderer to start playing what was just set as its transport, then seeks to the requested position.
+    /// </summary>
+    /// <param name="positionTicks">The position to seek to.</param>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     private async Task SeekAfterTransportChange(long positionTicks, CancellationToken cancellationToken)
     {
-        const int MaxWait = 15000000;
-        const int Interval = 500;
+        var maxWait = TimeSpan.FromSeconds(15);
+        var interval = TimeSpan.FromMilliseconds(500);
 
-        var currentWait = 0;
-        while (_device.TransportState != TransportState.PLAYING && currentWait < MaxWait)
+        var waited = TimeSpan.Zero;
+        while (_device.TransportState != TransportState.PLAYING)
         {
-            await Task.Delay(Interval, cancellationToken).ConfigureAwait(false);
-            currentWait += Interval;
+            if (waited >= maxWait)
+            {
+                _logger.LogWarning(
+                    "{DeviceName} did not start playing within {Seconds}s of the transport change, not seeking to {Position}",
+                    _session.DeviceName,
+                    maxWait.TotalSeconds,
+                    TimeSpan.FromTicks(positionTicks));
+
+                return;
+            }
+
+            await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+            waited += interval;
         }
 
         await _device.Seek(TimeSpan.FromTicks(positionTicks), cancellationToken).ConfigureAwait(false);

@@ -36,6 +36,32 @@ public class ControlHandler : BaseControlHandler
             return;
         }
 
+        // Every client is authorized and validated, so none of the counters that track a change of
+        // that ever moves. Answering zero is what a service that never revokes anything reports.
+        if (string.Equals(methodName, "GetValidationSucceededUpdateID", StringComparison.OrdinalIgnoreCase))
+        {
+            xmlWriter.WriteElementString("ValidationSucceededUpdateID", "0");
+            return;
+        }
+
+        if (string.Equals(methodName, "GetValidationRevokedUpdateID", StringComparison.OrdinalIgnoreCase))
+        {
+            xmlWriter.WriteElementString("ValidationRevokedUpdateID", "0");
+            return;
+        }
+
+        if (string.Equals(methodName, "GetAuthorizationGrantedUpdateID", StringComparison.OrdinalIgnoreCase))
+        {
+            xmlWriter.WriteElementString("AuthorizationGrantedUpdateID", "0");
+            return;
+        }
+
+        if (string.Equals(methodName, "GetAuthorizationDeniedUpdateID", StringComparison.OrdinalIgnoreCase))
+        {
+            xmlWriter.WriteElementString("AuthorizationDeniedUpdateID", "0");
+            return;
+        }
+
         throw new ResourceNotFoundException("Unexpected control request name: " + methodName);
     }
 

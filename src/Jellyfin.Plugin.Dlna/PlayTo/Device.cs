@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Security;
 using System.Threading;
@@ -19,6 +20,15 @@ namespace Jellyfin.Plugin.Dlna.PlayTo;
 /// </summary>
 public class Device : IDisposable
 {
+    private const int ImmediateTimerInterval = 100;
+    private const int ActiveTimerInterval = 10000;
+    private const int TransportChangeTimerInterval = 500;
+
+    private static readonly TimeSpan _stopPollInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan _stopTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan _transportSettleTime = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan _transportChangeGrace = TimeSpan.FromSeconds(30);
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger _logger;
     private readonly object _timerLock = new();
@@ -28,6 +38,8 @@ public class Device : IDisposable
     private DateTime _lastVolumeRefresh;
     private bool _volumeRefreshActive;
     private int _connectFailureCount;
+    private int _transportChanges;
+    private long _transportChangedAtTicks;
     private bool _disposed;
 
     /// <summary>
@@ -78,11 +90,7 @@ public class Device : IDisposable
     /// </summary>
     public int Volume
     {
-        get
-        {
-            RefreshVolumeIfNeeded().GetAwaiter().GetResult();
-            return _volume;
-        }
+        get => _volume;
 
         set => _volume = value;
     }
@@ -98,22 +106,22 @@ public class Device : IDisposable
     public TimeSpan Position { get; set; } = TimeSpan.FromSeconds(0);
 
     /// <summary>
-    /// Gets or sets the transport state.
+    /// Gets the transport state.
     /// </summary>
     public TransportState TransportState { get; private set; }
 
     /// <summary>
-    /// Gets or sets a value indicating whether the device is playing.
+    /// Gets a value indicating whether the device is playing.
     /// </summary>
     public bool IsPlaying => TransportState == TransportState.PLAYING;
 
     /// <summary>
-    /// Gets or sets a value indicating whether the device is paused.
+    /// Gets a value indicating whether the device is paused.
     /// </summary>
     public bool IsPaused => TransportState == TransportState.PAUSED_PLAYBACK;
 
     /// <summary>
-    /// Gets or sets a value indicating whether the device is stopped.
+    /// Gets a value indicating whether the device is stopped.
     /// </summary>
     public bool IsStopped => TransportState == TransportState.STOPPED;
 
@@ -133,7 +141,7 @@ public class Device : IDisposable
     private TransportCommands? RendererCommands { get; set; }
 
     /// <summary>
-    /// Gets or sets the current media info.
+    /// Gets the current media info.
     /// </summary>
     public UBaseObject? CurrentMediaInfo { get; private set; }
 
@@ -177,6 +185,9 @@ public class Device : IDisposable
     }
 
     private void RestartTimer(bool immediate = false)
+        => RestartTimerIn(immediate ? ImmediateTimerInterval : ActiveTimerInterval);
+
+    private void RestartTimerIn(int dueTime)
     {
         lock (_timerLock)
         {
@@ -187,8 +198,7 @@ public class Device : IDisposable
 
             _volumeRefreshActive = true;
 
-            var time = immediate ? 100 : 10000;
-            _timer?.Change(time, Timeout.Infinite);
+            _timer?.Change(dueTime, Timeout.Infinite);
         }
     }
 
@@ -210,9 +220,21 @@ public class Device : IDisposable
         }
     }
 
+    private bool IsAwaitingPlayback()
+    {
+        var changedAt = Interlocked.Read(ref _transportChangedAtTicks);
+
+        return changedAt != 0 && DateTime.UtcNow - new DateTime(changedAt, DateTimeKind.Utc) < _transportChangeGrace;
+    }
+
+    private void CloseTransportChangeGrace()
+        => Interlocked.Exchange(ref _transportChangedAtTicks, 0);
+
     /// <summary>
     /// Lowers the volume.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public Task VolumeDown(CancellationToken cancellationToken)
     {
         var sendVolume = Math.Max(Volume - 5, 0);
@@ -223,6 +245,8 @@ public class Device : IDisposable
     /// <summary>
     /// Rises the volume.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public Task VolumeUp(CancellationToken cancellationToken)
     {
         var sendVolume = Math.Min(Volume + 5, 100);
@@ -233,6 +257,8 @@ public class Device : IDisposable
     /// <summary>
     /// Toggles mute.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public Task ToggleMute(CancellationToken cancellationToken)
     {
         if (IsMuted)
@@ -246,6 +272,8 @@ public class Device : IDisposable
     /// <summary>
     /// Mutes the device.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task Mute(CancellationToken cancellationToken)
     {
         var success = await SetMute(true, cancellationToken).ConfigureAwait(true);
@@ -259,6 +287,8 @@ public class Device : IDisposable
     /// <summary>
     /// Un-mutes the device.
     /// </summary>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task Unmute(CancellationToken cancellationToken)
     {
         var success = await SetMute(false, cancellationToken).ConfigureAwait(true);
@@ -309,7 +339,7 @@ public class Device : IDisposable
 
         await new DlnaHttpClient(_logger, _httpClientFactory)
             .SendCommandAsync(
-                Properties.BaseUrl,
+                NormalizeUrl(service.ControlUrl),
                 service,
                 command.Name,
                 rendererCommands!.BuildPost(command, service.ServiceType, value), // null checked above
@@ -345,7 +375,7 @@ public class Device : IDisposable
 
         await new DlnaHttpClient(_logger, _httpClientFactory)
             .SendCommandAsync(
-                Properties.BaseUrl,
+                NormalizeUrl(service.ControlUrl),
                 service,
                 command.Name,
                 rendererCommands!.BuildPost(command, service.ServiceType, value), // null checked above
@@ -358,6 +388,7 @@ public class Device : IDisposable
     /// </summary>
     /// <param name="value">The value to seek to.</param>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task Seek(TimeSpan value, CancellationToken cancellationToken)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
@@ -371,7 +402,7 @@ public class Device : IDisposable
         var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
         await new DlnaHttpClient(_logger, _httpClientFactory)
             .SendCommandAsync(
-                Properties.BaseUrl,
+                NormalizeUrl(service.ControlUrl),
                 service,
                 command.Name,
                 avCommands!.BuildPost(command, service.ServiceType, string.Format(CultureInfo.InvariantCulture, "{0:hh}:{0:mm}:{0:ss}", value), "REL_TIME"), // null checked above
@@ -388,6 +419,7 @@ public class Device : IDisposable
     /// <param name="header">The header.</param>
     /// <param name="metaData">The meta data.</param>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task SetAvTransport(string url, string? header, string metaData, CancellationToken cancellationToken)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
@@ -410,26 +442,55 @@ public class Device : IDisposable
 
         var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
         var post = avCommands!.BuildPost(command, service.ServiceType, url, dictionary); // null checked above
-        await new DlnaHttpClient(_logger, _httpClientFactory)
-            .SendCommandAsync(
-                Properties.BaseUrl,
-                service,
-                command.Name,
-                post,
-                header: header,
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
 
-        await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+        // The transport passes through STOPPED on the way to the new track. A poll landing in that
+        // window would report the previous track as stopped and park the timer as if the renderer
+        // had gone idle, which leaves the whole playback of the new track unreported.
+        Interlocked.Increment(ref _transportChanges);
 
         try
         {
-            await SetPlay(avCommands, cancellationToken).ConfigureAwait(false);
+            // AVTransport:1 section 2.4.2 defines SetAVTransportURI for the STOPPED and NO_MEDIA_PRESENT states
+            // only. A renderer that is still playing, e.g. because it was stopped from its own remote, answers
+            // every following request with 705 (Transport is locked) until it is stopped. Others take the
+            // request and keep playing what they had, so the transport has to have come to a stop first.
+            await StopForTransportChange(avCommands!, cancellationToken).ConfigureAwait(false); // null checked above
+
+            // The renderer still holds the track that was queued behind the one it was playing. Renderers that
+            // move to their queued track when the transport starts would land on that instead of the track
+            // handed over here, a track further on than the one that was asked for.
+            await ClearNextAvTransport(avCommands!, service, cancellationToken).ConfigureAwait(false); // null checked above
+
+            await new DlnaHttpClient(_logger, _httpClientFactory)
+                .SendCommandAsync(
+                    NormalizeUrl(service.ControlUrl),
+                    service,
+                    command.Name,
+                    post,
+                    header: header,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await SetPlay(avCommands!, cancellationToken).ConfigureAwait(false); // null checked above
+            }
+            catch
+            {
+                // Some devices will throw an error if you tell it to play when it's already playing
+                // Others won't
+            }
+
+            // Hold the renderer while it starts the track, so nothing reaches it that it could take
+            // as the track to play instead. A poll cannot get past _transportChanges either.
+            await Task.Delay(_transportSettleTime, cancellationToken).ConfigureAwait(false);
         }
-        catch
+        finally
         {
-            // Some devices will throw an error if you tell it to play when it's already playing
-            // Others won't
+            Interlocked.Exchange(ref _transportChangedAtTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Decrement(ref _transportChanges);
         }
 
         RestartTimer(true);
@@ -446,7 +507,8 @@ public class Device : IDisposable
     /// SetNextAvTransport is used to specify to the DLNA device what is the next track to play.
     /// Without that information, the next track command on the device does not work.
     /// </remarks>
-    public async Task SetNextAvTransport(string url, string? header, string metaData, CancellationToken cancellationToken = default)
+    /// <returns><c>true</c> if the device was told about the next track; otherwise, <c>false</c>.</returns>
+    public async Task<bool> SetNextAvTransport(string url, string? header, string metaData, CancellationToken cancellationToken = default)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
 
@@ -457,7 +519,7 @@ public class Device : IDisposable
         var command = avCommands?.ServiceActions.FirstOrDefault(c => string.Equals(c.Name, "SetNextAVTransportURI", StringComparison.OrdinalIgnoreCase));
         if (command is null)
         {
-            return;
+            return false;
         }
 
         var dictionary = new Dictionary<string, string>
@@ -469,8 +531,94 @@ public class Device : IDisposable
         var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
         var post = avCommands!.BuildPost(command, service.ServiceType, url, dictionary); // null checked above
         await new DlnaHttpClient(_logger, _httpClientFactory)
-            .SendCommandAsync(Properties.BaseUrl, service, command.Name, post, header, cancellationToken)
+            .SendCommandAsync(NormalizeUrl(service.ControlUrl), service, command.Name, post, header, cancellationToken)
             .ConfigureAwait(false);
+
+        return true;
+    }
+
+    private async Task ClearNextAvTransport(TransportCommands avCommands, DeviceService service, CancellationToken cancellationToken)
+    {
+        var command = avCommands.ServiceActions.FirstOrDefault(c => string.Equals(c.Name, "SetNextAVTransportURI", StringComparison.OrdinalIgnoreCase));
+        if (command is null)
+        {
+            return;
+        }
+
+        // AVTransport:1 section 2.4.3: an empty NextURI is what tells a renderer to forget what it has queued.
+        var dictionary = new Dictionary<string, string>
+        {
+            { "NextURI", string.Empty },
+            { "NextURIMetaData", string.Empty }
+        };
+
+        try
+        {
+            await new DlnaHttpClient(_logger, _httpClientFactory)
+                .SendCommandAsync(
+                    NormalizeUrl(service.ControlUrl),
+                    service,
+                    command.Name,
+                    avCommands.BuildPost(command, service.ServiceType, string.Empty, dictionary),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A renderer that refuses an empty NextURI keeps what it had queued, which is what it did before
+            _logger.LogDebug(ex, "{Name} - Clearing the queued next track failed", Properties.Name);
+        }
+    }
+
+    private async Task StopForTransportChange(TransportCommands avCommands, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SetStop(avCommands, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Stopping a transport that is already idle is a no-op that some devices fault on
+            _logger.LogDebug(ex, "{Name} - Stop before SetAVTransportURI failed", Properties.Name);
+        }
+
+        var waited = TimeSpan.Zero;
+        while (true)
+        {
+            TransportState? state;
+            try
+            {
+                state = await GetTransportInfo(avCommands, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Without an answer there is nothing to wait for, so hand the track over
+                _logger.LogDebug(ex, "{Name} - Reading the transport state after Stop failed", Properties.Name);
+
+                return;
+            }
+
+            // No answer, or a state that is not modelled here such as the NO_MEDIA_PRESENT of an empty
+            // transport, leaves nothing to wait for: the renderer is as ready for a new track as a stopped one.
+            if (state is not (TransportState.PLAYING or TransportState.TRANSITIONING))
+            {
+                return;
+            }
+
+            if (waited >= _stopTimeout)
+            {
+                _logger.LogWarning(
+                    "{Name} - Transport still reports {State} {Seconds}s after it was stopped, handing over the track regardless",
+                    Properties.Name,
+                    state,
+                    _stopTimeout.TotalSeconds);
+
+                return;
+            }
+
+            await Task.Delay(_stopPollInterval, cancellationToken).ConfigureAwait(false);
+            waited += _stopPollInterval;
+        }
     }
 
     private static string CreateDidlMeta(string value)
@@ -483,6 +631,23 @@ public class Device : IDisposable
         return SecurityElement.Escape(value);
     }
 
+    private Task SetStop(TransportCommands avCommands, CancellationToken cancellationToken)
+    {
+        var command = avCommands.ServiceActions.FirstOrDefault(c => c.Name == "Stop");
+        if (command is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
+        return new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
+            NormalizeUrl(service.ControlUrl),
+            service,
+            command.Name,
+            avCommands.BuildPost(command, service.ServiceType, 1),
+            cancellationToken: cancellationToken);
+    }
+
     private Task SetPlay(TransportCommands avCommands, CancellationToken cancellationToken)
     {
         var command = avCommands.ServiceActions.FirstOrDefault(c => c.Name == "Play");
@@ -493,7 +658,7 @@ public class Device : IDisposable
 
         var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
         return new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             avCommands.BuildPost(command, service.ServiceType, 1),
@@ -504,6 +669,7 @@ public class Device : IDisposable
     /// Sends play command.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task SetPlay(CancellationToken cancellationToken)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
@@ -521,25 +687,19 @@ public class Device : IDisposable
     /// Sends stop command.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task SetStop(CancellationToken cancellationToken)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
-
-        var command = avCommands?.ServiceActions.FirstOrDefault(c => c.Name == "Stop");
-        if (command is null)
+        if (avCommands is null)
         {
             return;
         }
 
-        var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
-        await new DlnaHttpClient(_logger, _httpClientFactory)
-            .SendCommandAsync(
-                Properties.BaseUrl,
-                service,
-                command.Name,
-                avCommands!.BuildPost(command, service.ServiceType, 1), // null checked above
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+        await SetStop(avCommands, cancellationToken).ConfigureAwait(false);
+
+        // Stopping is meant to be observed right away, it is not a renderer on its way to a new track
+        CloseTransportChangeGrace();
 
         RestartTimer(true);
     }
@@ -548,6 +708,7 @@ public class Device : IDisposable
     /// Sends pause command.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task SetPause(CancellationToken cancellationToken)
     {
         var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
@@ -561,7 +722,7 @@ public class Device : IDisposable
         var service = GetAvTransportService() ?? throw new InvalidOperationException("Unable to find service");
         await new DlnaHttpClient(_logger, _httpClientFactory)
             .SendCommandAsync(
-                Properties.BaseUrl,
+                NormalizeUrl(service.ControlUrl),
                 service,
                 command.Name,
                 avCommands!.BuildPost(command, service.ServiceType, 1), // null checked above
@@ -580,9 +741,19 @@ public class Device : IDisposable
             return;
         }
 
+        // A transport change stops the renderer before handing it the next track, so what it reports
+        // in the meantime says nothing about what it is about to play. Come back once it is through.
+        if (Volatile.Read(ref _transportChanges) > 0)
+        {
+            RestartTimer(true);
+            return;
+        }
+
         try
         {
             var cancellationToken = CancellationToken.None;
+
+            await RefreshVolumeIfNeeded().ConfigureAwait(false);
 
             var avCommands = await GetAVProtocolAsync(cancellationToken).ConfigureAwait(false);
 
@@ -598,8 +769,26 @@ public class Device : IDisposable
                 return;
             }
 
+            // A renderer that was just handed a new track can still report STOPPED, or answer
+            // nothing at all, while it opens the stream. Taking that as idle would report the
+            // previous track as stopped and park the timer, so the playback that follows would
+            // never be reported at all.
+            if (transportState is null or TransportState.STOPPED && IsAwaitingPlayback())
+            {
+                _connectFailureCount = 0;
+                RestartTimerIn(TransportChangeTimerInterval);
+
+                return;
+            }
+
             if (transportState.HasValue)
             {
+                // The renderer is up, so anything it reports from here on is what it is really doing
+                if (transportState.Value != TransportState.STOPPED)
+                {
+                    CloseTransportChangeGrace();
+                }
+
                 // If we're not playing anything no need to get additional data
                 if (transportState.Value == TransportState.STOPPED)
                 {
@@ -693,7 +882,7 @@ public class Device : IDisposable
         }
 
         var result = await new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             rendererCommands!.BuildPost(command, service.ServiceType), // null checked above
@@ -743,7 +932,7 @@ public class Device : IDisposable
         }
 
         var result = await new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             rendererCommands!.BuildPost(command, service.ServiceType), // null checked above
@@ -776,7 +965,7 @@ public class Device : IDisposable
         }
 
         var result = await new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             avCommands.BuildPost(command, service.ServiceType),
@@ -822,7 +1011,7 @@ public class Device : IDisposable
         }
 
         var result = await new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             rendererCommands.BuildPost(command, service.ServiceType),
@@ -894,7 +1083,7 @@ public class Device : IDisposable
         }
 
         var result = await new DlnaHttpClient(_logger, _httpClientFactory).SendCommandAsync(
-            Properties.BaseUrl,
+            NormalizeUrl(service.ControlUrl),
             service,
             command.Name,
             rendererCommands.BuildPost(command, service.ServiceType),
@@ -982,9 +1171,25 @@ public class Device : IDisposable
         // first try to add a root node with a dlna namespace.
         try
         {
-            return XElement.Parse("<data xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">" + xml + "</data>")
-                .Descendants()
-                .First();
+            var wrapped = XElement.Parse("<data xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">" + xml + "</data>");
+
+            // A body that holds no element at all yields no descendant to return, so take
+            // FirstOrDefault: First would throw past the XmlException handlers of every
+            // remaining attempt and out of this method.
+            var element = wrapped.Descendants().FirstOrDefault();
+            if (element is not null)
+            {
+                return element;
+            }
+
+            // Some devices escape their metadata twice, which leaves the wrapped document holding
+            // the DIDL as text rather than as elements. Unescaping once more turns it back into
+            // markup. The value always shortens on the way, so this cannot recurse indefinitely.
+            var text = wrapped.Value;
+            if (!string.IsNullOrWhiteSpace(text) && text.Length < xml.Length)
+            {
+                return ParseResponse(text);
+            }
         }
         catch (XmlException)
         {
@@ -1015,12 +1220,12 @@ public class Device : IDisposable
 
         return new UBaseObject
         {
-            Id = container.GetAttributeValue(UPnpNamespaces.Id),
-            ParentId = container.GetAttributeValue(UPnpNamespaces.ParentId),
-            Title = container.GetValue(UPnpNamespaces.Title),
-            IconUrl = container.GetValue(UPnpNamespaces.Artwork),
+            Id = container.GetAttributeValue(UPnpNamespaces.Id) ?? string.Empty,
+            ParentId = container.GetAttributeValue(UPnpNamespaces.ParentId) ?? string.Empty,
+            Title = container.GetValue(UPnpNamespaces.Title) ?? string.Empty,
+            IconUrl = container.GetValue(UPnpNamespaces.Artwork) ?? string.Empty,
             SecondText = string.Empty,
-            Url = url,
+            Url = url ?? string.Empty,
             ProtocolInfo = GetProtocolInfo(container),
             MetaData = container.ToString()
         };
@@ -1057,11 +1262,7 @@ public class Device : IDisposable
             return null;
         }
 
-        string url = NormalizeUrl(Properties.BaseUrl, avService.ScpdUrl);
-
-        var httpClient = new DlnaHttpClient(_logger, _httpClientFactory);
-
-        var document = await httpClient.GetDataAsync(url, cancellationToken).ConfigureAwait(false);
+        var document = await GetServiceDescriptionAsync(avService, cancellationToken).ConfigureAwait(false);
         if (document is null)
         {
             return null;
@@ -1083,11 +1284,7 @@ public class Device : IDisposable
         var avService = GetServiceRenderingControl();
         ArgumentNullException.ThrowIfNull(avService);
 
-        string url = NormalizeUrl(Properties.BaseUrl, avService.ScpdUrl);
-
-        var httpClient = new DlnaHttpClient(_logger, _httpClientFactory);
-        _logger.LogDebug("Dlna Device.GetRenderingProtocolAsync");
-        var document = await httpClient.GetDataAsync(url, cancellationToken).ConfigureAwait(false);
+        var document = await GetServiceDescriptionAsync(avService, cancellationToken).ConfigureAwait(false);
         if (document is null)
         {
             return null;
@@ -1097,7 +1294,47 @@ public class Device : IDisposable
         return RendererCommands;
     }
 
-    private static string NormalizeUrl(string baseUrl, string url)
+    /// <summary>
+    /// Fetches the description of a service, retrying below <c>/dmr/</c> if the device does not serve it
+    /// at the location its description points to.
+    /// </summary>
+    /// <param name="service">The <see cref="DeviceService"/>.</param>
+    /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>The service description, or <c>null</c> if it could not be parsed.</returns>
+    private async Task<XDocument?> GetServiceDescriptionAsync(DeviceService service, CancellationToken cancellationToken)
+    {
+        var httpClient = new DlnaHttpClient(_logger, _httpClientFactory);
+        var url = NormalizeUrl(service.ScpdUrl);
+
+        try
+        {
+            return await httpClient.GetDataAsync(url, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            var fallbackUrl = GetDmrFallbackUrl(service.ScpdUrl);
+            if (fallbackUrl is null || string.Equals(fallbackUrl, url, StringComparison.Ordinal))
+            {
+                throw;
+            }
+
+            _logger.LogDebug(
+                ex,
+                "{Name} - no service description at {Url}, retrying at {FallbackUrl}",
+                Properties.Name,
+                url,
+                fallbackUrl);
+
+            return await httpClient.GetDataAsync(fallbackUrl, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a URL of the device description against its base URL.
+    /// </summary>
+    /// <param name="url">The URL to resolve.</param>
+    /// <returns>The absolute URL.</returns>
+    private string NormalizeUrl(string url)
     {
         // If it's already a complete url, don't stick anything onto the front of it
         if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
@@ -1105,9 +1342,11 @@ public class Device : IDisposable
             return url;
         }
 
-        if (!url.Contains('/', StringComparison.Ordinal))
+        // UPnP Device Architecture 1.0 section 2.1: relative URLs are resolved against the base URL,
+        // so a URL without a leading slash points next to the description, not to the server root.
+        if (Properties.BaseUri is not null && Uri.TryCreate(Properties.BaseUri, url, out var resolved))
         {
-            url = "/dmr/" + url;
+            return resolved.ToString();
         }
 
         if (!url.StartsWith('/'))
@@ -1115,7 +1354,34 @@ public class Device : IDisposable
             url = "/" + url;
         }
 
-        return baseUrl + url;
+        return Properties.BaseUrl + url;
+    }
+
+    /// <summary>
+    /// Gets the URL below <c>/dmr/</c> some devices serve their service descriptions from, without advertising it.
+    /// </summary>
+    /// <param name="url">The URL of the device description.</param>
+    /// <returns>The fallback URL, or <c>null</c> if it does not apply to <paramref name="url"/>.</returns>
+    private string? GetDmrFallbackUrl(string url)
+    {
+        if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase) || url.Contains('/', StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return Properties.BaseUrl + "/dmr/" + url;
+    }
+
+    /// <summary>
+    /// Gets the base URL a device is reachable at from the location of its device description.
+    /// </summary>
+    /// <param name="descriptionLocation">The location of the device description.</param>
+    /// <returns>The base URL.</returns>
+    internal static string GetBaseUrl(Uri descriptionLocation)
+    {
+        ArgumentNullException.ThrowIfNull(descriptionLocation);
+
+        return string.Format(CultureInfo.InvariantCulture, "http://{0}:{1}", descriptionLocation.Host, descriptionLocation.Port);
     }
 
     /// <summary>
@@ -1125,6 +1391,7 @@ public class Device : IDisposable
     /// <param name="httpClientFactory">Instance of the <see cref="IHttpClientFactory"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
     /// <param name="cancellationToken">The cancellation token to cancel the operation.</param>
+    /// <returns>The <see cref="Device"/>, or <c>null</c> if the device description could not be retrieved.</returns>
     public static async Task<Device?> CreateuPnpDeviceAsync(Uri url, IHttpClientFactory httpClientFactory, ILogger logger, CancellationToken cancellationToken)
     {
         var ssdpHttpClient = new DlnaHttpClient(logger, httpClientFactory);
@@ -1153,6 +1420,7 @@ public class Device : IDisposable
         {
             Name = string.Join(' ', friendlyNames),
             BaseUrl = string.Format(CultureInfo.InvariantCulture, "http://{0}:{1}", url.Host, url.Port),
+            BaseUri = GetDescriptionBaseUri(document, url),
             Services = GetServices(document)
         };
 
@@ -1219,6 +1487,30 @@ public class Device : IDisposable
         return new Device(deviceProperties, httpClientFactory, logger);
     }
 
+    /// <summary>
+    /// Gets the base <see cref="Uri"/> the relative URLs of a device description resolve against.
+    /// </summary>
+    /// <param name="document">The device description.</param>
+    /// <param name="descriptionUrl">The <see cref="Uri"/> the description was retrieved from.</param>
+    /// <returns>The base <see cref="Uri"/>.</returns>
+    private static Uri GetDescriptionBaseUri(XDocument document, Uri descriptionUrl)
+    {
+        // UPnP Device Architecture 1.0 section 2.1: URLBase takes precedence over the retrieval URL if present.
+        var urlBase = document.Descendants(UPnpNamespaces.Ud.GetName("URLBase")).FirstOrDefault()?.Value.Trim();
+        if (!string.IsNullOrEmpty(urlBase) && Uri.TryCreate(urlBase, UriKind.Absolute, out var baseUri))
+        {
+            // URLBase denotes a directory and is specified to end with a slash, but not all devices honor that.
+            if (!baseUri.AbsolutePath.EndsWith('/'))
+            {
+                baseUri = new Uri(baseUri, baseUri.AbsolutePath + "/");
+            }
+
+            return baseUri;
+        }
+
+        return descriptionUrl;
+    }
+
     private static DeviceIcon CreateIcon(XElement element)
     {
         ArgumentNullException.ThrowIfNull(element);
@@ -1249,35 +1541,35 @@ public class Device : IDisposable
             ServiceType = element.GetDescendantValue(UPnpNamespaces.Ud.GetName("serviceType")) ?? string.Empty
         };
 
-        private static List<DeviceService> GetServices(XDocument document)
+    private static List<DeviceService> GetServices(XDocument document)
+    {
+        List<DeviceService> deviceServices = [];
+        foreach (var services in document.Descendants(UPnpNamespaces.Ud.GetName("serviceList")))
         {
-            List<DeviceService> deviceServices = [];
-            foreach (var services in document.Descendants(UPnpNamespaces.Ud.GetName("serviceList")))
+            if (services is null)
             {
-                if (services is null)
-                {
-                    continue;
-                }
-
-                var servicesList = services.Descendants(UPnpNamespaces.Ud.GetName("service"));
-                if (servicesList is null)
-                {
-                    continue;
-                }
-
-                foreach (var element in servicesList)
-                {
-                    var service = Create(element);
-
-                    if (service is not null)
-                    {
-                        deviceServices.Add(service);
-                    }
-                }
+                continue;
             }
 
-            return deviceServices;
+            var servicesList = services.Descendants(UPnpNamespaces.Ud.GetName("service"));
+            if (servicesList is null)
+            {
+                continue;
+            }
+
+            foreach (var element in servicesList)
+            {
+                var service = Create(element);
+
+                if (service is not null)
+                {
+                    deviceServices.Add(service);
+                }
+            }
         }
+
+        return deviceServices;
+    }
 
     private void UpdateMediaInfo(UBaseObject? mediaInfo, TransportState state)
     {

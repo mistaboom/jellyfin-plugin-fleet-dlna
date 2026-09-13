@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
 using Jellyfin.Extensions;
 using Jellyfin.Plugin.Dlna.Didl;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Dlna.Service;
@@ -49,7 +51,16 @@ public abstract class BaseControlHandler
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error processing control request");
+            // A control point that navigated away mid-request drops the connection, which is its
+            // business rather than a fault of ours, so it is not reported as one.
+            if (ex is ConnectionResetException || ex.InnerException is SocketException)
+            {
+                Logger.LogDebug(ex, "Control point closed the connection before its request was answered");
+            }
+            else
+            {
+                Logger.LogError(ex, "Error processing control request");
+            }
 
             return ControlErrorHandler.GetResponse(ex);
         }

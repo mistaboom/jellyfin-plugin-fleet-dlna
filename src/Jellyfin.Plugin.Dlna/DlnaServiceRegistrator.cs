@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Text;
 using Jellyfin.Plugin.Dlna.ConnectionManager;
 using Jellyfin.Plugin.Dlna.ContentDirectory;
+using Jellyfin.Plugin.Dlna.Localization;
 using Jellyfin.Plugin.Dlna.Main;
 using Jellyfin.Plugin.Dlna.MediaReceiverRegistrar;
 using Jellyfin.Plugin.Dlna.Model;
@@ -29,6 +30,8 @@ public class DlnaServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddHttpClient(NamedClient.Dlna, c =>
             {
+                c.Timeout = TimeSpan.FromSeconds(30);
+
                 c.DefaultRequestHeaders.UserAgent.ParseAdd(
                     string.Format(
                         CultureInfo.InvariantCulture,
@@ -47,6 +50,7 @@ public class DlnaServiceRegistrator : IPluginServiceRegistrator
                 RequestHeaderEncodingSelector = (_, _) => Encoding.UTF8
             });
 
+        serviceCollection.AddSingleton<DlnaLocalization>();
         serviceCollection.AddSingleton<IDlnaManager, DlnaManager>();
         serviceCollection.AddSingleton<IDeviceDiscovery, DeviceDiscovery>();
         serviceCollection.AddSingleton<IContentDirectory, ContentDirectoryService>();
@@ -54,7 +58,6 @@ public class DlnaServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IMediaReceiverRegistrar, MediaReceiverRegistrarService>();
 
         serviceCollection.AddScoped<AudioHelper>();
-        serviceCollection.AddScoped<DynamicHlsHelper>();
 
         serviceCollection.AddSingleton<ISsdpCommunicationsServer>(provider => new SsdpCommunicationsServer(
             provider.GetRequiredService<INetworkManager>(),
