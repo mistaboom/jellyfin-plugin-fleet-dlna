@@ -9,6 +9,26 @@ namespace Jellyfin.Plugin.Dlna.Configuration;
 public class DlnaPluginConfiguration : BasePluginConfiguration
 {
     /// <summary>
+    /// Gets or sets the maximum number of video items prepared in one DLNA response.
+    /// </summary>
+    public int MaximumVideoPageSize { get; set; } = 20;
+
+    /// <summary>
+    /// Gets or sets the maximum number of video stream plans built in parallel.
+    /// </summary>
+    public int StreamPlanningParallelism { get; set; } = 8;
+
+    /// <summary>
+    /// Gets or sets the maximum number of independent virtual-folder count queries run in parallel.
+    /// </summary>
+    public int CountQueryParallelism { get; set; } = 4;
+
+    /// <summary>
+    /// Gets or sets the maximum number of items represented by a Latest folder.
+    /// </summary>
+    public int LatestItemsLimit { get; set; } = 50;
+
+    /// <summary>
     /// Gets or sets a value indicating whether gets or sets a value to indicate the status of the dlna playTo subsystem.
     /// </summary>
     public bool EnablePlayTo { get; set; } = true;
@@ -35,7 +55,8 @@ public class DlnaPluginConfiguration : BasePluginConfiguration
     public bool SendOnlyMatchedHost { get; set; } = true;
 
     /// <summary>
-    /// Gets or sets the default user account that the dlna server uses.
+    /// Gets or sets the legacy default user account.
+    /// Fleet DLNA ignores this option and automatically uses an administrator account.
     /// </summary>
     public Guid? DefaultUserId { get; set; }
 }

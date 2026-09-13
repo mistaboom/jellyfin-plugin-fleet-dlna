@@ -1,48 +1,50 @@
 const FleetDlnaConfigurationPage = {
     pluginUniqueId: '17F31D5C-4F2E-4824-903B-759D481B711A',
+    defaultMaximumVideoPageSize: 20,
+    defaultStreamPlanningParallelism: 8,
+    defaultCountQueryParallelism: 4,
+    defaultLatestItemsLimit: 50,
     defaultDiscoveryInterval: 60,
-    defaultAliveInterval: 100,
+    defaultAliveInterval: 180,
+    clampInteger: function (value, fallback, minimum, maximum) {
+        const parsedValue = parseInt(value, 10);
+        if (Number.isNaN(parsedValue)) {
+            return fallback;
+        }
+
+        return Math.min(Math.max(parsedValue, minimum), maximum);
+    },
     loadConfiguration: function (page) {
         return ApiClient.getPluginConfiguration(this.pluginUniqueId)
             .then((config) => {
+                page.querySelector('#fleetMaximumVideoPageSize').value = this.clampInteger(config.MaximumVideoPageSize, this.defaultMaximumVideoPageSize, 5, 200);
+                page.querySelector('#fleetStreamPlanningParallelism').value = this.clampInteger(config.StreamPlanningParallelism, this.defaultStreamPlanningParallelism, 1, 32);
+                page.querySelector('#fleetCountQueryParallelism').value = this.clampInteger(config.CountQueryParallelism, this.defaultCountQueryParallelism, 1, 16);
+                page.querySelector('#fleetLatestItemsLimit').value = this.clampInteger(config.LatestItemsLimit, this.defaultLatestItemsLimit, 5, 200);
                 page.querySelector('#dlnaPlayTo').checked = config.EnablePlayTo;
-                page.querySelector('#dlnaDiscoveryInterval').value = parseInt(config.ClientDiscoveryIntervalSeconds, 10) || this.defaultDiscoveryInterval;
+                page.querySelector('#dlnaDiscoveryInterval').value = this.clampInteger(config.ClientDiscoveryIntervalSeconds, this.defaultDiscoveryInterval, 10, 3600);
                 page.querySelector('#dlnaBlastAlive').checked = config.BlastAliveMessages;
-                page.querySelector('#dlnaAliveInterval').value = parseInt(config.AliveMessageIntervalSeconds, 10) || this.defaultAliveInterval;
+                page.querySelector('#dlnaAliveInterval').value = this.clampInteger(config.AliveMessageIntervalSeconds, this.defaultAliveInterval, 30, 3600);
                 page.querySelector('#dlnaMatchedHost').checked = config.SendOnlyMatchedHost;
-
-                return ApiClient.getUsers()
-                    .then((users) => {
-                        this.populateUsers(page, users, config.DefaultUserId);
-                    });
             })
             .finally(() => {
                 Dashboard.hideLoadingMsg();
             });
     },
-    populateUsers: function (page, users, selectedId) {
-        let html = '';
-        html += '<option value="">None</option>';
-        for (let i = 0, length = users.length; i < length; i++) {
-            const user = users[i];
-            html += '<option value="' + user.Id + '">' + user.Name + '</option>';
-        }
-
-        page.querySelector('#dlnaSelectUser').innerHTML = html;
-        page.querySelector('#dlnaSelectUser').value = selectedId;
-    },
     save: function (page) {
         Dashboard.showLoadingMsg();
         return ApiClient.getPluginConfiguration(this.pluginUniqueId)
             .then((config) => {
+                config.MaximumVideoPageSize = this.clampInteger(page.querySelector('#fleetMaximumVideoPageSize').value, this.defaultMaximumVideoPageSize, 5, 200);
+                config.StreamPlanningParallelism = this.clampInteger(page.querySelector('#fleetStreamPlanningParallelism').value, this.defaultStreamPlanningParallelism, 1, 32);
+                config.CountQueryParallelism = this.clampInteger(page.querySelector('#fleetCountQueryParallelism').value, this.defaultCountQueryParallelism, 1, 16);
+                config.LatestItemsLimit = this.clampInteger(page.querySelector('#fleetLatestItemsLimit').value, this.defaultLatestItemsLimit, 5, 200);
                 config.EnablePlayTo = page.querySelector('#dlnaPlayTo').checked;
-                config.ClientDiscoveryIntervalSeconds = parseInt(page.querySelector('#dlnaDiscoveryInterval').value, 10) || this.defaultDiscoveryInterval;
+                config.ClientDiscoveryIntervalSeconds = this.clampInteger(page.querySelector('#dlnaDiscoveryInterval').value, this.defaultDiscoveryInterval, 10, 3600);
                 config.BlastAliveMessages = page.querySelector('#dlnaBlastAlive').checked;
-                config.AliveMessageIntervalSeconds = parseInt(page.querySelector('#dlnaAliveInterval').value, 10) || this.defaultAliveInterval;
+                config.AliveMessageIntervalSeconds = this.clampInteger(page.querySelector('#dlnaAliveInterval').value, this.defaultAliveInterval, 30, 3600);
                 config.SendOnlyMatchedHost = page.querySelector('#dlnaMatchedHost').checked;
-
-                const selectedUser = page.querySelector('#dlnaSelectUser').value;
-                config.DefaultUserId = selectedUser.length > 0 ? selectedUser : null;
+                config.DefaultUserId = null;
 
                 return ApiClient.updatePluginConfiguration(this.pluginUniqueId, config);
             })

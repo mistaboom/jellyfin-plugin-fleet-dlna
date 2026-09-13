@@ -103,7 +103,7 @@ public class ContentDirectoryService : BaseService, IContentDirectory
 
         var serverAddress = request.RequestedUrl[..request.RequestedUrl.IndexOf("/dlna", StringComparison.OrdinalIgnoreCase)];
 
-        var user = GetUser(profile);
+        var user = GetUser();
 
         return new ControlHandler(
                 Logger,
@@ -124,42 +124,21 @@ public class ContentDirectoryService : BaseService, IContentDirectory
     }
 
     /// <summary>
-    /// Get the user stored in the device profile.
+    /// Gets an administrator account so the unauthenticated DLNA surface can expose every library.
     /// </summary>
-    /// <param name="profile">The <see cref="DeviceProfile"/>.</param>
     /// <returns>The <see cref="User"/>.</returns>
-    private User? GetUser(DlnaDeviceProfile profile)
+    private User? GetUser()
     {
-        if (!string.IsNullOrEmpty(profile.UserId))
-        {
-            var user = _userManager.GetUserById(Guid.Parse(profile.UserId));
-
-            if (user is not null)
-            {
-                return user;
-            }
-        }
-
-        var userId = DlnaPlugin.Instance.Configuration.DefaultUserId;
-
-        if (userId is not null && !userId.Equals(default))
-        {
-            var user = _userManager.GetUserById(userId.Value);
-
-            if (user is not null)
-            {
-                return user;
-            }
-        }
-
+        User? fallbackUser = null;
         foreach (var user in _userManager.GetUsers())
         {
+            fallbackUser ??= user;
             if (user.HasPermission(PermissionKind.IsAdministrator))
             {
                 return user;
             }
         }
 
-        return _userManager.GetUsers().FirstOrDefault();
+        return fallbackUser;
     }
 }

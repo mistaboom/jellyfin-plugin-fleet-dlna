@@ -45,22 +45,6 @@ public class ControlHandler : BaseControlHandler
     private const string NsUpnp = "urn:schemas-upnp-org:metadata-1-0/upnp/";
     private const int MaxPageSize = 200;
 
-    /// <summary>
-    /// How many of the counts a listing needs are queried at once. The queries overlap only in
-    /// part, so a wider fan out mostly adds contention for everything else using the library.
-    /// </summary>
-    private const int MaxCountConcurrency = 4;
-
-    // Bound expensive media-source and DIDL work per response, not the total
-    // result set. Preserve TotalMatches and StartingIndex so clients that page
-    // using NumberReturned can retrieve the remaining entries.
-    private const int MaximumVideoPageSize = 20;
-
-    // Build playback plans concurrently so large letter folders do not spend
-    // several seconds resolving one item at a time. Keep this bounded because
-    // many TVs can browse the server at once.
-    private const int StreamPlanningParallelism = 8;
-
     // Force the fleet clients to invalidate the older cached virtual hierarchy.
     // v8 previously used +800000; this purpose-built hierarchy deliberately moves
     // forward again while preserving Jellyfin's own update-id changes.
@@ -615,7 +599,7 @@ public class ControlHandler : BaseControlHandler
                 && !serverItem.Item.IsDisplayedAsFolder
                 && serverItem.Item.MediaType == MediaType.Video)
             .AsParallel()
-            .WithDegreeOfParallelism(StreamPlanningParallelism)
+            .WithDegreeOfParallelism(GetStreamPlanningParallelism())
             .Select(serverItem =>
                 (
                     ItemId: serverItem.Item.Id,
@@ -888,8 +872,32 @@ public class ControlHandler : BaseControlHandler
         HandleBrowse(xmlWriter, browseParams, deviceId);
     }
 
-    private static int GetVideoPageLimit(int? requestedCount) =>
-        Math.Min(requestedCount ?? MaximumVideoPageSize, MaximumVideoPageSize);
+    private static int GetVideoPageLimit(int? requestedCount)
+    {
+        var configuredLimit = Math.Clamp(
+            DlnaPlugin.Instance.Configuration.MaximumVideoPageSize,
+            5,
+            MaxPageSize);
+        return Math.Min(requestedCount ?? configuredLimit, configuredLimit);
+    }
+
+    private static int GetStreamPlanningParallelism() =>
+        Math.Clamp(
+            DlnaPlugin.Instance.Configuration.StreamPlanningParallelism,
+            1,
+            32);
+
+    private static int GetCountQueryParallelism() =>
+        Math.Clamp(
+            DlnaPlugin.Instance.Configuration.CountQueryParallelism,
+            1,
+            16);
+
+    private static int GetLatestItemsLimit() =>
+        Math.Clamp(
+            DlnaPlugin.Instance.Configuration.LatestItemsLimit,
+            5,
+            MaxPageSize);
 
     private static bool IsVideoPage(ServerItem serverItem) =>
         serverItem.StubType is StubType.MovieLetter
@@ -1358,7 +1366,7 @@ public class ControlHandler : BaseControlHandler
             // Bounded, so browsing cannot fan a single request out across the whole library at once.
             Parallel.ForEach(
                 stubs,
-                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(stubs.Count, MaxCountConcurrency) },
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(stubs.Count, GetCountQueryParallelism()) },
                 stub =>
                 {
                     // A stub that lists its query as it comes reports that query's own total, so
@@ -2391,10 +2399,10 @@ public class ControlHandler : BaseControlHandler
 
         if (itemType == BaseItemKind.Movie)
         {
-            // Use the existing default of 50 recent movies as a stable logical
-            // view. Keep its total independent of the serialization page size,
-            // while retaining Jellyfin's latest-item and user-preference logic.
-            limit = 50;
+            // Use the configured recent-movie limit as a stable logical view.
+            // Keep its total independent of the serialization page size while
+            // retaining Jellyfin's latest-item and user-preference logic.
+            limit = GetLatestItemsLimit();
         }
         else if (query.StartIndex > 0)
         {
@@ -2430,7 +2438,7 @@ public class ControlHandler : BaseControlHandler
 
         if (itemType == BaseItemKind.Movie)
         {
-            var page = items.Take(query.Limit ?? 50)
+            var page = items.Take(query.Limit ?? GetLatestItemsLimit())
                 .Select(item => new ServerItem(item, null))
                 .ToArray();
             return new QueryResult<ServerItem>(query.StartIndex, totalCount, page);
