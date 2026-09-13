@@ -17,6 +17,6 @@ artifacts:
   - "Jellyfin.Plugin.FleetDlna.Playback.dll"
   - "FleetDlna.Rssdp.dll"
 changelog: |-
-  - Update Fleet DLNA for Jellyfin 12 and .NET 10.
-  - Incorporate upstream Jellyfin 12 playback, discovery, MIME type, and compatibility fixes.
-  - Preserve fleet navigation, fast alphabetical browsing, Latest, and library-scoped Genres.
+  - Fix the Fleet DLNA settings page on Jellyfin 12.
+  - Always expose all libraries through an administrator query context.
+  - Add tunable video page size, stream-planning concurrency, folder-count concurrency, and Latest-folder size.
