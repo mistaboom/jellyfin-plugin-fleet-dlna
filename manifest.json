@@ -11,7 +11,7 @@
         "version": "2.0.0.0",
         "changelog": "Updated for Jellyfin 12 and .NET 10. Includes upstream playback, discovery, MIME type, scoped-library, multi-part video, and compatibility fixes while preserving Fleet navigation.",
         "targetAbi": "12.0.0.0",
-        "sourceUrl": "https://github.com/mistaboom/jellyfin-plugin-dlna/releases/download/v2.0.0.0/FleetDlna_2.0.0.0.zip",
+        "sourceUrl": "https://github.com/mistaboom/jellyfin-plugin-fleet-dlna/releases/download/v2.0.0.0/FleetDlna_2.0.0.0.zip",
         "checksum": "ea88c25c11915d17b4dbf2bbc378ad61",
         "timestamp": "2026-09-13T05:45:58Z"
       },
@@ -19,7 +19,7 @@
         "version": "1.0.0.0",
         "changelog": "Initial Fleet DLNA release with fast alphabetical browsing, Latest, Genres, and Samsung/LG optimizations.",
         "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/mistaboom/jellyfin-plugin-dlna/releases/download/v1.0.0.0/FleetDlna_1.0.0.0.zip",
+        "sourceUrl": "https://github.com/mistaboom/jellyfin-plugin-fleet-dlna/releases/download/v1.0.0.0/FleetDlna_1.0.0.0.zip",
         "checksum": "44011449f8e571d1bcb1d914505cff99",
         "timestamp": "2026-09-09T21:13:33Z"
       }

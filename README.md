@@ -19,7 +19,7 @@ Fleet DLNA is a Jellyfin DLNA server plugin optimized for groups of Samsung and 
 
 ## Installation
 
-Add `https://raw.githubusercontent.com/mistaboom/jellyfin-plugin-dlna/master/manifest.json` as a Jellyfin plugin catalog, or download the release ZIP and extract it into a `Fleet DLNA` directory under Jellyfin's plugins directory. Restart Jellyfin after installation or upgrade.
+Add `https://raw.githubusercontent.com/mistaboom/jellyfin-plugin-fleet-dlna/master/manifest.json` as a Jellyfin plugin catalog, or download the release ZIP and extract it into a `Fleet DLNA` directory under Jellyfin's plugins directory. Restart Jellyfin after installation or upgrade.
 
 ## Development
 
