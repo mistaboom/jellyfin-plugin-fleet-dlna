@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,6 +64,7 @@ public class ControlHandler : BaseControlHandler
     private readonly DidlBuilder _didlBuilder;
 
     private readonly DlnaDeviceProfile _profile;
+    private readonly string _deviceId;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ControlHandler"/> class.
@@ -80,6 +83,7 @@ public class ControlHandler : BaseControlHandler
     /// <param name="userViewManager">Instance of the <see cref="IUserViewManager"/> interface.</param>
     /// <param name="mediaEncoder">Instance of the <see cref="IMediaEncoder"/> interface.</param>
     /// <param name="tvSeriesManager">Instance of the <see cref="ITVSeriesManager"/> interface.</param>
+    /// <param name="controlPointAddress">The address of the control point requesting media URLs.</param>
     public ControlHandler(
         ILogger logger,
         ILibraryManager libraryManager,
@@ -94,7 +98,8 @@ public class ControlHandler : BaseControlHandler
         IMediaSourceManager mediaSourceManager,
         IUserViewManager userViewManager,
         IMediaEncoder mediaEncoder,
-        ITVSeriesManager tvSeriesManager)
+        ITVSeriesManager tvSeriesManager,
+        IPAddress? controlPointAddress = null)
         : base(logger)
     {
         _libraryManager = libraryManager;
@@ -104,6 +109,8 @@ public class ControlHandler : BaseControlHandler
         _userViewManager = userViewManager;
         _tvSeriesManager = tvSeriesManager;
         _profile = profile;
+        var identity = controlPointAddress?.MapToIPv6().GetAddressBytes() ?? Guid.NewGuid().ToByteArray();
+        _deviceId = "fleet-dlna-" + Convert.ToHexStringLower(SHA256.HashData(identity));
         _movieQueryScope = new MovieLibraryQueryScope(libraryManager, logger);
 
         _didlBuilder = new DidlBuilder(
@@ -129,8 +136,6 @@ public class ControlHandler : BaseControlHandler
         ArgumentNullException.ThrowIfNull(xmlWriter);
         ArgumentNullException.ThrowIfNull(methodParams);
         _movieQueryScope.Reset();
-
-        const string DeviceId = "test";
 
         if (string.Equals(methodName, "GetSearchCapabilities", StringComparison.OrdinalIgnoreCase))
         {
@@ -163,7 +168,7 @@ public class ControlHandler : BaseControlHandler
 
         if (string.Equals(methodName, "Browse", StringComparison.OrdinalIgnoreCase))
         {
-            HandleBrowse(xmlWriter, methodParams, DeviceId);
+            HandleBrowse(xmlWriter, methodParams, _deviceId);
             return;
         }
 
@@ -187,13 +192,13 @@ public class ControlHandler : BaseControlHandler
 
         if (string.Equals(methodName, "Search", StringComparison.OrdinalIgnoreCase))
         {
-            HandleSearch(xmlWriter, methodParams, DeviceId);
+            HandleSearch(xmlWriter, methodParams, _deviceId);
             return;
         }
 
         if (string.Equals(methodName, "X_BrowseByLetter", StringComparison.OrdinalIgnoreCase))
         {
-            HandleXBrowseByLetter(xmlWriter, methodParams, DeviceId);
+            HandleXBrowseByLetter(xmlWriter, methodParams, _deviceId);
             return;
         }
 

@@ -17,6 +17,6 @@ artifacts:
   - "Jellyfin.Plugin.FleetDlna.Playback.dll"
   - "FleetDlna.Rssdp.dll"
 changelog: |-
-  - Fix the Fleet DLNA settings page on Jellyfin 12.
-  - Always expose all libraries through an administrator query context.
-  - Add tunable video page size, stream-planning concurrency, folder-count concurrency, and Latest-folder size.
+  - Reclaim progressive video transcodes after the last TV disconnects.
+  - Reuse the current stream when a TV reconnects during the cleanup grace period.
+  - Identify browsing control points individually so multiple TVs can play the same title independently.

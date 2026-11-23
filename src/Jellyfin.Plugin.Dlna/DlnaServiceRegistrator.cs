@@ -58,6 +58,7 @@ public class DlnaServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IMediaReceiverRegistrar, MediaReceiverRegistrarService>();
 
         serviceCollection.AddScoped<AudioHelper>();
+        serviceCollection.AddSingleton<ProgressiveVideoTranscodes>();
 
         serviceCollection.AddSingleton<ISsdpCommunicationsServer>(provider => new SsdpCommunicationsServer(
             provider.GetRequiredService<INetworkManager>(),

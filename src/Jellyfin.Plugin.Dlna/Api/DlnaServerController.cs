@@ -297,6 +297,7 @@ public class DlnaServerController : ControllerBase
     {
         return service.ProcessControlRequestAsync(new ControlRequest(Request.Headers)
         {
+            RemoteAddress = HttpContext.Connection.RemoteIpAddress,
             InputXml = requestStream,
             TargetServerUuId = id,
             RequestedUrl = GetAbsoluteUri()

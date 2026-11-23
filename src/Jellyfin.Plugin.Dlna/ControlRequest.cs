@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using Microsoft.AspNetCore.Http;
 
 namespace Jellyfin.Plugin.Dlna;
@@ -21,6 +22,11 @@ public class ControlRequest
     /// Gets the <see cref="IHeaderDictionary"/> instance.
     /// </summary>
     public IHeaderDictionary Headers { get; }
+
+    /// <summary>
+    /// Gets the address of the control point making the request.
+    /// </summary>
+    public IPAddress? RemoteAddress { get; init; }
 
     /// <summary>
     /// Gets or sets the <see cref="Stream"/>.

@@ -2,9 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.Dlna.Model;
+using Jellyfin.Plugin.Dlna.Playback.Extensions;
 using Jellyfin.Plugin.Dlna.Playback.Model;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Net;
@@ -19,6 +22,7 @@ using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Plugin.Dlna.Playback.Api;
 
@@ -38,6 +42,7 @@ public class DlnaVideosController : ControllerBase
     private readonly ITranscodeManager _transcodingJobHelper;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly EncodingHelper _encodingHelper;
+    private readonly ProgressiveVideoTranscodes _progressiveTranscodes;
 
     private readonly TranscodingJobType _transcodingJobType = TranscodingJobType.Progressive;
 
@@ -54,6 +59,7 @@ public class DlnaVideosController : ControllerBase
     /// <param name="transcodingJobHelper">Instance of the <see cref="ITranscodeManager"/> class.</param>
     /// <param name="httpClientFactory">Instance of the <see cref="IHttpClientFactory"/> interface.</param>
     /// <param name="encodingHelper">Instance of <see cref="EncodingHelper"/>.</param>
+    /// <param name="progressiveTranscodes">Owns the progressive DLNA video streams.</param>
     public DlnaVideosController(
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -64,7 +70,8 @@ public class DlnaVideosController : ControllerBase
         IDeviceManager deviceManager,
         ITranscodeManager transcodingJobHelper,
         IHttpClientFactory httpClientFactory,
-        EncodingHelper encodingHelper)
+        EncodingHelper encodingHelper,
+        ProgressiveVideoTranscodes progressiveTranscodes)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -76,6 +83,7 @@ public class DlnaVideosController : ControllerBase
         _transcodingJobHelper = transcodingJobHelper;
         _httpClientFactory = httpClientFactory;
         _encodingHelper = encodingHelper;
+        _progressiveTranscodes = progressiveTranscodes;
     }
 
     /// <summary>
@@ -292,17 +300,10 @@ public class DlnaVideosController : ControllerBase
             return BadRequest($"Input protocol {state.InputProtocol} cannot be streamed statically");
         }
 
-        var outputPath = state.OutputFilePath;
-        var outputPathExists = System.IO.File.Exists(outputPath);
-
-        var transcodingJob = _transcodingJobHelper.GetTranscodingJob(outputPath, TranscodingJobType.Progressive);
-        var isTranscodeCached = outputPathExists && transcodingJob is not null;
-
-        StreamingHelpers.AddDlnaHeaders(state, Response.Headers, (@static.HasValue && @static.Value) || isTranscodeCached, state.Request.StartTimeTicks, Request, _dlnaManager);
-
         // Static stream
         if (@static.HasValue && @static.Value)
         {
+            StreamingHelpers.AddDlnaHeaders(state, Response.Headers, true, state.Request.StartTimeTicks, Request, _dlnaManager);
             var contentType = DlnaMimeTypes.GetVideoMimeType(state.OutputContainer, state.TargetTimestamp)
                               ?? state.GetMimeType("." + state.OutputContainer, false)
                               ?? state.GetMimeType(state.MediaPath);
@@ -318,17 +319,77 @@ public class DlnaVideosController : ControllerBase
                 contentType);
         }
 
-        // Need to start ffmpeg (because media can't be returned directly)
+        return await GetProgressiveVideo(state, isHeadRequest, cancellationTokenSource).ConfigureAwait(false);
+    }
+
+    private async Task<ActionResult> GetProgressiveVideo(DlnaStreamState state, bool isHeadRequest, CancellationTokenSource cancellationTokenSource)
+    {
+        var outputPath = state.OutputFilePath;
         var encodingOptions = _serverConfigurationManager.GetEncodingOptions();
-        var ffmpegCommandLineArguments = _encodingHelper.GetProgressiveVideoFullCommandLine(state, encodingOptions, EncoderPreset.superfast);
-        return await FileStreamResponseHelpers.GetTranscodedFile(
-            state,
-            isHeadRequest,
-            HttpContext,
-            _transcodingJobHelper,
-            ffmpegCommandLineArguments,
-            _transcodingJobType,
-            cancellationTokenSource).ConfigureAwait(false);
+        var command = _encodingHelper.GetProgressiveVideoFullCommandLine(state, encodingOptions, EncoderPreset.superfast);
+        // Live/tuner inputs have a separate core lifecycle which also closes the upstream source.
+        if (!state.IsInputVideo || state.InputProtocol != MediaProtocol.File || state.RunTimeTicks is not > 0
+            || state.MediaSource.IsInfiniteStream || state.MediaSource.RequiresOpening || state.MediaSource.RequiresClosing
+            || !string.IsNullOrEmpty(state.MediaSource.LiveStreamId) || !string.IsNullOrEmpty(state.Request.LiveStreamId))
+        {
+            var cached = System.IO.File.Exists(outputPath) && _transcodingJobHelper.GetTranscodingJob(outputPath, _transcodingJobType) is not null;
+            StreamingHelpers.AddDlnaHeaders(state, Response.Headers, cached, state.Request.StartTimeTicks, Request, _dlnaManager);
+            return await FileStreamResponseHelpers.GetTranscodedFile(
+                state, isHeadRequest, HttpContext, _transcodingJobHelper, command, _transcodingJobType, cancellationTokenSource).ConfigureAwait(false);
+        }
+
+        var writerOwnsState = false;
+        try
+        {
+            var userId = User.GetUserId();
+            // The planned command contains the logical (source, agent, device and session)
+            // path and the effective codecs, seek position, audio/subtitle tracks and filters.
+            var identity = $"{HttpContext.Connection.RemoteIpAddress}\n{userId:N}\n{state.MediaSource.ETag}\n{command}";
+            var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+            StreamingHelpers.AddDlnaHeaders(state, Response.Headers, _progressiveTranscodes.HasOutput(key), state.Request.StartTimeTicks, Request, _dlnaManager);
+            Response.Headers[HeaderNames.AcceptRanges] = "none";
+            var contentType = DlnaMimeTypes.GetVideoMimeType(state.OutputContainer, state.TargetTimestamp) ?? state.GetMimeType(outputPath);
+            if (isHeadRequest)
+            {
+                Response.ContentType = contentType;
+                return Ok();
+            }
+
+            var stream = await _progressiveTranscodes.OpenAsync(key, outputPath, StartWriter, HttpContext.RequestAborted).ConfigureAwait(false);
+            Response.RegisterForDispose(stream);
+            return File(stream, contentType);
+
+            async Task<TranscodingJob> StartWriter(string sessionId, string path)
+            {
+                state.Request.PlaySessionId = sessionId;
+                state.OutputFilePath = path;
+                var args = _encodingHelper.GetProgressiveVideoFullCommandLine(state, encodingOptions, EncoderPreset.superfast);
+                // The first request may disconnect while FFmpeg is opening the input.
+                // Once a reader is acquired the writer belongs to all of its readers.
+                using var abortStartup = HttpContext.RequestAborted.Register(() =>
+                {
+                    try
+                    {
+                        cancellationTokenSource.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Core already disposed the source when FFmpeg exited.
+                    }
+                });
+                var job = await _transcodingJobHelper.StartFfMpeg(state, path, args, userId, _transcodingJobType, cancellationTokenSource).ConfigureAwait(false);
+                writerOwnsState = true;
+                return job;
+            }
+        }
+        finally
+        {
+            if (!writerOwnsState)
+            {
+                state.Dispose();
+                cancellationTokenSource.Dispose();
+            }
+        }
     }
 
     /// <summary>
